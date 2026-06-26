@@ -10,7 +10,7 @@ SEM 图像拼接工具 (Image Stitching for SEM)
 import cv2
 import numpy as np
 import os
-import glob
+import sys
 import re
 
 
@@ -61,6 +61,20 @@ class SEMStitcher:
             clipLimit=clahe_clip_limit,
             tileGridSize=clahe_tile_size,
         )
+
+        # ---- GUI 回调 ----
+        self._progress_callback = None
+
+    def set_progress_callback(self, callback):
+        """设置进度回调函数 callback(msg: str)，供 GUI 实时显示日志"""
+        self._progress_callback = callback
+
+    def _log(self, msg: str):
+        """统一日志输出：有回调则发给 GUI，否则 print"""
+        if self._progress_callback:
+            self._progress_callback(msg)
+        else:
+            print(msg)
 
     # ================================================================
     # 预处理：CLAHE 增强对比度（仅用于特征提取，不修改原图）
@@ -340,12 +354,12 @@ class SEMStitcher:
         return np.clip(np.round(sum_img), 0, 255).astype(np.uint8)
 
     # ================================================================
-    # 拼接两张图像（核心方法）
+    # 拼接两 images（核心方法）
     # ================================================================
     def stitch_two(self, img1: np.ndarray, img2: np.ndarray,
                    label1: str = "img1", label2: str = "img2") -> np.ndarray:
         """
-        拼接两张图像。
+        拼接两 images。
 
         img2 作为参考图，img1 平移到对齐位置后融合。
         返回拼接后的图像。
@@ -365,7 +379,7 @@ class SEMStitcher:
         # 2. 特征提取
         kp1, des1 = self._extract_features(img1_enhanced)
         kp2, des2 = self._extract_features(img2_enhanced)
-        print(f"  特征点: {label1}={len(kp1)}, {label2}={len(kp2)}")
+        self._log(f"  Keypoints: {label1}={len(kp1)}, {label2}={len(kp2)}")
 
         # 3. 计算平移量
         dx, dy, inliers, n_good = self._compute_translation(kp1, des1, kp2, des2)
@@ -376,12 +390,12 @@ class SEMStitcher:
                 f"请检查图像重叠是否足够。"
             )
 
-        print(f"  Good Matches: {n_good}, RANSAC 内点: {inliers}")
-        print(f"  平移向量: Δx={dx:.1f} px, Δy={dy:.1f} px")
+        self._log(f"  Good Matches: {n_good}, RANSAC inliers: {inliers}")
+        self._log(f"  Translation: Δx={dx:.1f} px, Δy={dy:.1f} px")
 
         # 4. 融合拼接（保持原图亮度，仅重叠区羽化过渡）
         result = self._blend_images(img1, img2, dx, dy)
-        print(f"  融合完成 → 画布尺寸: {result.shape[1]}x{result.shape[0]}")
+        self._log(f"  Blend done -> canvas: {result.shape[1]}x{result.shape[0]}")
         # 报告重叠量
         h1, w1 = img1.shape
         h2, w2 = img2.shape
@@ -390,8 +404,8 @@ class SEMStitcher:
         ox_w = min(x1 + w1, x2 + w2) - max(x1, x2)
         ox_h = min(y1 + h1, y2 + h2) - max(y1, y2)
         if ox_w > 0 and ox_h > 0:
-            print(f"  羽化重叠区域: {int(ox_w)}x{int(ox_h)} px "
-                  f"({'水平' if ox_w <= ox_h else '垂直'}方向渐变)")
+            self._log(f"  Blend overlap: {int(ox_w)}x{int(ox_h)} px "
+                  f"({'水平' if ox_w <= ox_h else '垂直'}blend)")
 
         return result
 
@@ -401,7 +415,7 @@ class SEMStitcher:
     def _try_match_pair(self, img_a: np.ndarray, img_b: np.ndarray,
                         label_a: str = "A", label_b: str = "B") -> tuple:
         """
-        尝试匹配两张图像，使用边缘图强制算法关注宏观结构。
+        Try匹配两 images，使用边缘图强制算法关注宏观结构。
 
         1) 提取边缘图 (GaussianBlur + Sobel)
         2) 在边缘图上 SIFT → FLANN → RANSAC 粗对齐
@@ -420,12 +434,12 @@ class SEMStitcher:
         kp_b, des_b = self._extract_features(edge_b)
         dx, dy, inliers, n_good = self._compute_translation(kp_a, des_a, kp_b, des_b)
 
-        print(f"  特征点(边缘图): {label_a}={len(kp_a)}, {label_b}={len(kp_b)}")
+        self._log(f"  Keypoints (edge map): {label_a}={len(kp_a)}, {label_b}={len(kp_b)}")
         if dx is not None:
-            print(f"  SIFT粗对齐: Matches={n_good}, Inliers={inliers}, "
+            self._log(f"  SIFT coarse: Matches={n_good}, Inliers={inliers}, "
                   f"Δx={dx:.1f}, Δy={dy:.1f} px")
         else:
-            print(f"  SIFT匹配失败: Matches={n_good}, Inliers={inliers}")
+            self._log(f"  SIFT failed: Matches={n_good}, Inliers={inliers}")
 
         if dx is None:
             return None, None, 0
@@ -436,12 +450,12 @@ class SEMStitcher:
         dx_fine, dy_fine = self._fine_align_phase(enhanced_a, enhanced_b, dx, dy)
 
         if abs(dx_fine) > 0.01 or abs(dy_fine) > 0.01:
-            print(f"  相位相关精调: Δx={dx_fine:.2f}, Δy={dy_fine:.2f} px")
+            self._log(f"  Phase corr fine: Δx={dx_fine:.2f}, Δy={dy_fine:.2f} px")
 
         return dx, dy, inliers  # quality = inlier count
 
     # ================================================================
-    # 将单张图像添加到预分配的浮点画布（含曝光补偿 + 羽化融合）
+    # 将单 imagesAdd到预分配的浮点画布（含曝光补偿 + 羽化融合）
     # ================================================================
     def _blend_onto_canvas(self,
                            sum_img: np.ndarray,
@@ -537,8 +551,8 @@ class SEMStitcher:
             actual_overlap_px = int((w_actual > 0).sum())
             total_px = ow * oh
             direction = "水平" if ow <= oh else "垂直"
-            print(f"  羽化重叠: {ow}x{oh} px ({direction}渐变, "
-                  f"实际内容={actual_overlap_px}/{total_px} px)")
+            self._log(f"  Blend overlap: {ow}x{oh} px ({direction}blend, "
+                  f"content={actual_overlap_px}/{total_px} px)")
 
     # ================================================================
     # 批量顺序拼接（连续匹配 + 全局定位）
@@ -548,24 +562,24 @@ class SEMStitcher:
     # ================================================================
     def stitch_sequence(self, image_paths: list) -> np.ndarray:
         """
-        拼接多张图像（支持 2D 网格）。
+        拼接多 images（支持 2D 网格）。
 
         策略（解决一维链式累加误差）：
         1. 两两全对匹配所有可能重叠的图像对
         2. 用匹配质量（RANSAC 内点数）构建最大生成树 (MST)
         3. 从 MST 根节点 BFS 遍历，分配全局坐标
-        4. 按坐标逐一将图像添加到画布，保留羽化融合
+        4. 按坐标逐一将图像Add到画布，保留羽化融合
 
         这样拼接路径永远选择"最可靠的边缘"，切断误差累积。
         """
         n = len(image_paths)
         if n < 2:
-            raise ValueError("至少需要 2 张图像才能拼接")
+            raise ValueError("至少需要 2  images才能拼接")
 
-        print(f"\n{'='*60}")
-        print(f"开始多图拼接，共 {n} 张图像")
-        print(f"策略: 两两匹配 → MST 图优化 → 全局定位 → 羽化融合")
-        print(f"{'='*60}")
+        self._log(f"\n{'='*60}")
+        self._log(f"Starting multi-stitch, {n} images")
+        self._log(f"Strategy: pairwise match -> graph optimization -> global positioning -> blend")
+        self._log(f"{'='*60}")
 
         # ---- 阶段 1：加载所有图像 ----
         images = []
@@ -574,17 +588,17 @@ class SEMStitcher:
             if img is None:
                 raise FileNotFoundError(f"无法读取图像: {p}")
             images.append(img)
-            print(f"  已加载: {os.path.basename(p)} ({img.shape[1]}x{img.shape[0]})")
+            self._log(f"  Loaded: {os.path.basename(p)} ({img.shape[1]}x{img.shape[0]})")
 
-        # ---- 阶段 2：两两全对匹配（N×(N-1)/2 对） ----
-        print(f"\n--- 阶段 1: 全对匹配（共 {n*(n-1)//2} 对） ---")
+        # ---- 阶段 2：两两全对匹配（N×(N-1)/2  pairs) ----
+        self._log(f"\n--- Phase 1: Pairwise matching ({n*(n-1)//2} pairs) ---")
         edges = []  # (quality, i, j, dx, dy)  quality = RANSAC 内点数
 
         for i in range(n):
             for j in range(i + 1, n):
                 fname_i = os.path.basename(image_paths[i])
                 fname_j = os.path.basename(image_paths[j])
-                print(f"\n  尝试 [{i}↔{j}]: {fname_i} ↔ {fname_j}")
+                self._log(f"\n  Try [{i}↔{j}]: {fname_i} ↔ {fname_j}")
 
                 dx, dy, quality = self._try_match_pair(
                     images[i], images[j], label_a=fname_i, label_b=fname_j
@@ -592,9 +606,9 @@ class SEMStitcher:
 
                 if dx is not None and quality >= 8:
                     edges.append((quality, i, j, dx, dy))
-                    print(f"  ✓ 匹配成功，质量={quality}")
+                    self._log(f"  OK  quality={quality}")
                 else:
-                    print(f"  ✗ 匹配失败或无重叠")
+                    self._log(f"  No match / no overlap")
 
         if len(edges) < n - 1:
             raise RuntimeError(
@@ -603,13 +617,13 @@ class SEMStitcher:
             )
 
         # ---- 阶段 3：加权最小二乘全局平差 ----
-        print(f"\n--- 阶段 2: 全局最小二乘平差 (共 {len(edges)} 条边) ---")
+        self._log(f"\n--- Phase 2: Weighted least squares ({len(edges)} edges) ---")
 
         degree = [0] * n
         for _, i, j, _, _ in edges:
             degree[i] += 1; degree[j] += 1
         root = max(range(n), key=lambda x: degree[x])
-        print(f"  中心锚点: [{root}] {os.path.basename(image_paths[root])} (连接度={degree[root]})")
+        self._log(f"  Anchor: [{root}] {os.path.basename(image_paths[root])} (degree={degree[root]})")
 
         A_x, B_x, A_y, B_y = [], [], [], []
         for quality, i, j, dx, dy in edges:
@@ -626,7 +640,7 @@ class SEMStitcher:
 
         A_x = np.array(A_x); B_x = np.array(B_x)
         A_y = np.array(A_y); B_y = np.array(B_y)
-        print(f"  矩阵: {A_x.shape[0]} 方程 × {n} 未知数")
+        self._log(f"  Matrix: {A_x.shape[0]} eqns x {n} unknowns")
 
         sol_x, rx, rank_x, _ = np.linalg.lstsq(A_x, B_x, rcond=None)
         sol_y, ry, rank_y, _ = np.linalg.lstsq(A_y, B_y, rcond=None)
@@ -635,14 +649,14 @@ class SEMStitcher:
 
         rx_s = f"X残差={rx[0]:.1f}" if len(rx) > 0 else "X确定"
         ry_s = f"Y残差={ry[0]:.1f}" if len(ry) > 0 else "Y确定"
-        print(f"  {rx_s}, {ry_s} (rank X={rank_x}, Y={rank_y})")
+        self._log(f"  {rx_s}, {ry_s} (rank X={rank_x}, Y={rank_y})")
 
         for i in range(n):
             fname = os.path.basename(image_paths[i])
-            print(f"  [{i}] {fname}: ({global_x[i]:.1f}, {global_y[i]:.1f})")
+            self._log(f"  [{i}] {fname}: ({global_x[i]:.1f}, {global_y[i]:.1f})")
 
         # ---- 阶段 4：预分配画布 + 逐一羽化融合 ----
-        print(f"\n--- 阶段 3: 融合合成 ---")
+        self._log(f"\n--- Phase 3: Blend composition ---")
 
         all_left = []
         all_top = []
@@ -662,12 +676,12 @@ class SEMStitcher:
         canvas_w = int(np.ceil(max(all_right) - canvas_x_min))
         canvas_h = int(np.ceil(max(all_bottom) - canvas_y_min))
 
-        print(f"  画布尺寸: {canvas_w} x {canvas_h}")
+        self._log(f"  Canvas: {canvas_w} x {canvas_h}")
 
         sum_img = np.zeros((canvas_h, canvas_w), dtype=np.float64)
         sum_weight = np.zeros((canvas_h, canvas_w), dtype=np.float64)
 
-        # 按 BFS 顺序添加（从根沿所有成功边广度优先）
+        # 按 BFS 顺序Add（从根沿所有成功边广度优先）
         adj_all = [[] for _ in range(n)]
         for _, i, j, _, _ in edges:
             adj_all[i].append(j); adj_all[j].append(i)
@@ -690,17 +704,17 @@ class SEMStitcher:
             y_pos = int(round(global_y[idx])) - canvas_y_min
             x_pos = int(x_pos)
             y_pos = int(y_pos)
-            print(f"\n  添加 [{idx}] {fname} at ({x_pos}, {y_pos})")
+            self._log(f"\n  Add [{idx}] {fname} at ({x_pos}, {y_pos})")
             self._blend_onto_canvas(sum_img, sum_weight, images[idx], x_pos, y_pos)
 
         valid = sum_weight > 1e-6
         sum_img[valid] /= sum_weight[valid]
         result = np.clip(np.round(sum_img), 0, 255).astype(np.uint8)
 
-        print(f"\n{'='*60}")
-        print(f"全部 {n} 张图像拼接完成！")
-        print(f"最终尺寸: {result.shape[1]} x {result.shape[0]}")
-        print(f"{'='*60}")
+        self._log(f"\n{'='*60}")
+        self._log(f"All {n} images stitched!")
+        self._log(f"Final size: {result.shape[1]} x {result.shape[0]}")
+        self._log(f"{'='*60}")
 
         return result
 
@@ -709,33 +723,28 @@ class SEMStitcher:
 # 主程序入口
 # ============================================================
 if __name__ == "__main__":
-    # ---- 配置 ----
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    IMG_DIR = os.path.join(BASE_DIR, "F82H-BA07-054_2026_06_22")
     OUTPUT_PATH = os.path.join(BASE_DIR, "stitched_panorama.tif")
 
-    # ---- 自动读取目标文件夹下的所有匹配图像 ----
-    pattern = os.path.join(IMG_DIR, "F82H-BA07-054_*.tif")
-    image_paths = sorted(
-        glob.glob(pattern),
-        key=lambda p: int(re.search(r"_(\d+)\.tif$", p).group(1))
-    )
+    if len(sys.argv) < 3:
+        print("Usage: python3 main.py <img1.tif> <img2.tif> [img3.tif ...]")
+        print("  Stitch multiple TIFF images using pure-translation alignment.")
+        print("  For the GUI, run: python3 gui.py")
+        sys.exit(1)
 
-    if len(image_paths) < 2:
-        raise RuntimeError(
-            f"在 {IMG_DIR} 下找到的图像少于 2 张！\n"
-            f"匹配模式: {pattern}\n"
-            f"找到: {image_paths}"
-        )
+    image_paths = [os.path.abspath(p) for p in sys.argv[1:]]
+    for p in image_paths:
+        if not os.path.isfile(p):
+            print(f"File not found: {p}")
+            sys.exit(1)
 
-    print(f"找到 {len(image_paths)} 张待拼接图像:")
+    print(f"Found {len(image_paths)} images to stitch:")
     for p in image_paths:
         print(f"  - {os.path.basename(p)}")
 
-    # ---- 创建拼接器 ----
     stitcher = SEMStitcher(
         sift_n_features=0,
-        sift_contrast_threshold=0.01,  # 降低以适配边缘图
+        sift_contrast_threshold=0.01,
         sift_edge_threshold=10,
         flann_trees=5,
         flann_checks=100,
@@ -746,14 +755,12 @@ if __name__ == "__main__":
         clahe_tile_size=(8, 8),
     )
 
-    # ---- 执行拼接 ----
     result = stitcher.stitch_sequence(image_paths)
 
-    # ---- 保存 ----
     cv2.imwrite(OUTPUT_PATH, result)
-    print(f"\n结果已保存至: {OUTPUT_PATH}")
+    print(f"\nResult saved to: {OUTPUT_PATH}")
 
-    # ---- 预览（无 GUI 环境自动跳过） ----
+    # 预览
     try:
         display_img = result.copy()
         max_display_size = 1400
@@ -762,8 +769,7 @@ if __name__ == "__main__":
         if scale < 1.0:
             display_img = cv2.resize(display_img, None, fx=scale, fy=scale,
                                      interpolation=cv2.INTER_AREA)
-            print(f"  预览缩放: {scale:.2f}x")
-
+            print(f"  Preview scale: {scale:.2f}x")
         cv2.imshow("Stitched Panorama", display_img)
         cv2.waitKey(100)
         try:
@@ -771,14 +777,14 @@ if __name__ == "__main__":
         except Exception:
             visible = -1
         if visible < 1:
-            print("  (无 GUI 环境，跳过窗口显示)")
+            print("  (headless, skip display)")
             cv2.destroyAllWindows()
         else:
-            print("  按任意键关闭窗口...")
+            print("  Press any key to close...")
             cv2.waitKey(0)
             cv2.destroyAllWindows()
     except Exception:
-        print("  (无 GUI 环境，跳过窗口显示)")
+        print("  (headless, skip display)")
         cv2.destroyAllWindows()
 
-    print("\n===== 全部完成! =====")
+    print("\n===== All done! =====")
