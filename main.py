@@ -69,6 +69,29 @@ class SEMStitcher:
         return self.clahe.apply(img)
 
     # ================================================================
+    # 边缘图提取：降噪 → Sobel → 归一化，强制匹配宏观结构
+    # ================================================================
+    def _extract_edge_map(self, img: np.ndarray) -> np.ndarray:
+        """
+        提取边缘梯度幅值图，用于相位相关精细对齐。
+
+        1) CLAHE 增强局部对比度（提升暗区的梯度响应）
+        2) GaussianBlur 模糊掉高频划痕/噪点（σ≈3, kernel=11）
+        3) Sobel 提取梯度幅值（宏观边缘，如圆孔边界）
+        4) 归一化到 0-255
+        """
+        # 先增强对比度，否则暗区 Sobel 梯度太弱
+        enhanced = self.clahe.apply(img)
+        # 强降噪：模糊掉划痕和细微纹理，保留宏观结构
+        blurred = cv2.GaussianBlur(enhanced, (11, 11), 3.0)
+        # Sobel 梯度幅值
+        grad_x = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
+        edge_map = np.sqrt(grad_x ** 2 + grad_y ** 2)
+        edge_map = cv2.normalize(edge_map, None, 0, 255, cv2.NORM_MINMAX)
+        return edge_map.astype(np.uint8)
+
+    # ================================================================
     # 特征提取
     # ================================================================
     def _extract_features(self, img: np.ndarray) -> tuple:
@@ -370,42 +393,51 @@ class SEMStitcher:
         return result
 
     # ================================================================
-    # 匹配相邻图像对（仅两张原图之间，不涉及 base）
+    # 结构对齐匹配（边缘图 SIFT + 相位相关）
     # ================================================================
-    def _match_pair(self, img_a: np.ndarray, img_b: np.ndarray,
-                    label_a: str = "A", label_b: str = "B") -> tuple:
+    def _try_match_pair(self, img_a: np.ndarray, img_b: np.ndarray,
+                        label_a: str = "A", label_b: str = "B") -> tuple:
         """
-        两步对齐法匹配相邻两张图像：
-          1) SIFT + FLANN + RANSAC → 粗对齐 (整数像素级)
-          2) 相位相关 (Phase Correlation) → 精细对齐 (亚像素级)
+        尝试匹配两张图像，使用边缘图强制算法关注宏观结构。
 
-        img_a 平移到 img_b 坐标系的 (dx, dy)。
-        返回: (dx, dy, inliers, n_good)
+        1) 提取边缘图 (GaussianBlur + Sobel)
+        2) 在边缘图上 SIFT → FLANN → RANSAC 粗对齐
+        3) 在边缘图上相位相关精细对齐
+
+        返回: (dx, dy, quality)
+          dx, dy  = img_a → img_b 的总平移量（None 表示匹配失败）
+          quality = RANSAC 内点数量（用于 MST 边权重）
         """
-        # ---- 第一步：SIFT 粗对齐 ----
+        # ---- SIFT 粗对齐（在 CLAHE 增强图上，特征丰富） ----
         enhanced_a = self._preprocess(img_a)
         enhanced_b = self._preprocess(img_b)
         kp_a, des_a = self._extract_features(enhanced_a)
         kp_b, des_b = self._extract_features(enhanced_b)
         dx, dy, inliers, n_good = self._compute_translation(kp_a, des_a, kp_b, des_b)
 
-        print(f"  特征点: {label_a}={len(kp_a)}, {label_b}={len(kp_b)}")
-        print(f"  粗对齐: Good Matches={n_good}, RANSAC内点={inliers}, "
-              f"Δx={dx:.1f}, Δy={dy:.1f} px" if dx is not None else
-              f"  粗对齐: Good Matches={n_good}, RANSAC内点={inliers} (失败)")
+        print(f"  特征点(CLAHE): {label_a}={len(kp_a)}, {label_b}={len(kp_b)}")
+        if dx is not None:
+            print(f"  SIFT粗对齐: Matches={n_good}, Inliers={inliers}, "
+                  f"Δx={dx:.1f}, Δy={dy:.1f} px")
+        else:
+            print(f"  SIFT匹配失败: Matches={n_good}, Inliers={inliers}")
 
         if dx is None:
-            return dx, dy, inliers, n_good
+            return None, None, 0
 
-        # ---- 第二步：相位相关精细对齐（用原始图，保留真实边缘） ----
-        dx_fine, dy_fine = self._fine_align_phase(img_a, img_b, dx, dy)
+        # ---- 提取边缘图 ----
+        edge_a = self._extract_edge_map(img_a)
+        edge_b = self._extract_edge_map(img_b)
+
+        # ---- 相位相关精细对齐（在边缘图上，聚焦宏观结构） ----
+        dx_fine, dy_fine = self._fine_align_phase(edge_a, edge_b, dx, dy)
         dx += dx_fine
         dy += dy_fine
 
         if abs(dx_fine) > 0.01 or abs(dy_fine) > 0.01:
-            print(f"  精细对齐(相位相关): Δx={dx_fine:.2f}, Δy={dy_fine:.2f} px")
+            print(f"  相位相关精调: Δx={dx_fine:.2f}, Δy={dy_fine:.2f} px")
 
-        return dx, dy, inliers, n_good
+        return dx, dy, inliers  # quality = inlier count
 
     # ================================================================
     # 将单张图像添加到预分配的浮点画布（含曝光补偿 + 羽化融合）
@@ -510,27 +542,28 @@ class SEMStitcher:
     # ================================================================
     # 批量顺序拼接（连续匹配 + 全局定位）
     # ================================================================
+    # ================================================================
+    # 图优化全局定位 + 合成
+    # ================================================================
     def stitch_sequence(self, image_paths: list) -> np.ndarray:
         """
-        拼接多张图像。
+        拼接多张图像（支持 2D 网格）。
 
-        策略：
-        1. 相邻图像对匹配 → 获取相对位移
-        2. 累加得到每张图像在全局画布上的坐标
-        3. 按坐标顺序逐一将图像添加到画布，重叠区做曝光补偿 + 羽化
+        策略（解决一维链式累加误差）：
+        1. 两两全对匹配所有可能重叠的图像对
+        2. 用匹配质量（RANSAC 内点数）构建最大生成树 (MST)
+        3. 从 MST 根节点 BFS 遍历，分配全局坐标
+        4. 按坐标逐一将图像添加到画布，保留羽化融合
 
-        参数:
-            image_paths: 已排序的图像文件路径列表
-        返回:
-            最终拼接结果 (uint8 灰度图)
+        这样拼接路径永远选择"最可靠的边缘"，切断误差累积。
         """
         n = len(image_paths)
         if n < 2:
             raise ValueError("至少需要 2 张图像才能拼接")
 
         print(f"\n{'='*60}")
-        print(f"开始多图顺序拼接，共 {n} 张图像")
-        print(f"策略: 相邻匹配 → 全局定位 → 逐一融合")
+        print(f"开始多图拼接，共 {n} 张图像")
+        print(f"策略: 两两匹配 → MST 图优化 → 全局定位 → 羽化融合")
         print(f"{'='*60}")
 
         # ---- 阶段 1：加载所有图像 ----
@@ -542,48 +575,98 @@ class SEMStitcher:
             images.append(img)
             print(f"  已加载: {os.path.basename(p)} ({img.shape[1]}x{img.shape[0]})")
 
-        # ---- 阶段 2：匹配相邻图像对，获取相对位移 ----
-        print(f"\n--- 阶段 1: 相邻匹配 ---")
-        rel_dx = [0.0]  # img[0] 无相对位移
-        rel_dy = [0.0]
-        match_inliers = [0]
+        # ---- 阶段 2：两两全对匹配（N×(N-1)/2 对） ----
+        print(f"\n--- 阶段 1: 全对匹配（共 {n*(n-1)//2} 对） ---")
+        edges = []  # (quality, i, j, dx, dy)  quality = RANSAC 内点数
 
-        for i in range(1, n):
-            fname_a = os.path.basename(image_paths[i - 1])
-            fname_b = os.path.basename(image_paths[i])
-            print(f"\n  匹配 [{i-1}→{i}]: {fname_a} → {fname_b}")
+        for i in range(n):
+            for j in range(i + 1, n):
+                fname_i = os.path.basename(image_paths[i])
+                fname_j = os.path.basename(image_paths[j])
+                print(f"\n  尝试 [{i}↔{j}]: {fname_i} ↔ {fname_j}")
 
-            dx, dy, inliers, n_good = self._match_pair(
-                images[i - 1], images[i], label_a=fname_a, label_b=fname_b
-            )
-
-            if dx is None:
-                raise RuntimeError(
-                    f"相邻匹配失败 [{i-1}→{i}]！"
-                    f"内点={inliers}, Good Matches={n_good}"
+                dx, dy, quality = self._try_match_pair(
+                    images[i], images[j], label_a=fname_i, label_b=fname_j
                 )
 
-            rel_dx.append(dx)
-            rel_dy.append(dy)
-            match_inliers.append(inliers)
+                if dx is not None and quality >= 8:
+                    edges.append((quality, i, j, dx, dy))
+                    print(f"  ✓ 匹配成功，质量={quality}")
+                else:
+                    print(f"  ✗ 匹配失败或无重叠")
 
-        # ---- 阶段 3：累加全局坐标 ----
-        # pos[i] = pos[i-1] - (rel_dx[i], rel_dy[i])
-        # 因为 rel_dx 是 img[i-1] → img[i] 的平移，所以 img[i] 在 img[i-1] 的 (-dx, -dy) 方向
-        print(f"\n--- 阶段 2: 全局坐标 ---")
-        global_x = [0.0]   # 纯 Python float
-        global_y = [0.0]
-        for i in range(1, n):
-            global_x.append(float(global_x[-1] - float(rel_dx[i])))
-            global_y.append(float(global_y[-1] - float(rel_dy[i])))
+        if len(edges) < n - 1:
+            raise RuntimeError(
+                f"匹配边数量不足 ({len(edges)} < {n-1})，无法构成连通图！"
+                f"请检查图像重叠是否足够。"
+            )
+
+        # ---- 阶段 3：Kruskal 最大生成树 (MST) ----
+        print(f"\n--- 阶段 2: 构建最大生成树 (MST) ---")
+        edges.sort(key=lambda e: e[0], reverse=True)  # 按质量降序
+
+        parent = list(range(n))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+                return True
+            return False
+
+        mst_edges = []
+        for weight, i, j, dx, dy in edges:
+            if union(i, j):
+                mst_edges.append((i, j, dx, dy, weight))
+                fname_i = os.path.basename(image_paths[i])
+                fname_j = os.path.basename(image_paths[j])
+                print(f"  MST 边: [{i}]{fname_i} ↔ [{j}]{fname_j} "
+                      f"(质量={weight}, Δx={dx:.1f}, Δy={dy:.1f})")
+            if len(mst_edges) == n - 1:
+                break
+
+        # ---- 阶段 4: BFS 分配全局坐标 ----
+        print(f"\n--- 阶段 3: 分配全局坐标 ---")
+        # 构建邻接表
+        adj = [[] for _ in range(n)]
+        for i, j, dx, dy, w in mst_edges:
+            # 边 (i→j): pos[j] = pos[i] - dx
+            adj[i].append((j, dx, dy))
+            # 反向 (j→i): pos[i] = pos[j] - (-dx) = pos[j] + dx
+            adj[j].append((i, -dx, -dy))
+
+        # 根节点：选连接度最高的（在 MST 中边最多）
+        root = max(range(n), key=lambda x: len(adj[x]))
+        print(f"  MST 根节点: [{root}] {os.path.basename(image_paths[root])} "
+              f"(连接度={len(adj[root])})")
+
+        global_x = [None] * n
+        global_y = [None] * n
+        global_x[root] = 0.0
+        global_y[root] = 0.0
+
+        stack = [root]
+        while stack:
+            u = stack.pop()
+            for v, dx, dy in adj[u]:
+                if global_x[v] is None:
+                    global_x[v] = global_x[u] - dx
+                    global_y[v] = global_y[u] - dy
+                    stack.append(v)
+
+        for i in range(n):
             fname = os.path.basename(image_paths[i])
-            print(f"  [{i}] {fname}: 全局位置 ({global_x[-1]:.0f}, {global_y[-1]:.0f}) "
-                  f"| 相对位移 ({-rel_dx[i]:.0f}, {-rel_dy[i]:.0f})")
+            print(f"  [{i}] {fname}: ({global_x[i]:.0f}, {global_y[i]:.0f})")
 
-        # ---- 阶段 4：预分配画布 + 逐一融合 ----
-        print(f"\n--- 阶段 3: 融合合成 ---")
+        # ---- 阶段 5：预分配画布 + 逐一羽化融合 ----
+        print(f"\n--- 阶段 4: 融合合成 ---")
 
-        # 计算全局包围盒
         all_left = []
         all_top = []
         all_right = []
@@ -602,26 +685,34 @@ class SEMStitcher:
         canvas_w = int(np.ceil(max(all_right) - canvas_x_min))
         canvas_h = int(np.ceil(max(all_bottom) - canvas_y_min))
 
-        print(f"  全局包围盒: ({canvas_x_min}, {canvas_y_min}) → "
-              f"({canvas_x_min + canvas_w}, {canvas_y_min + canvas_h})")
         print(f"  画布尺寸: {canvas_w} x {canvas_h}")
 
-        # 预分配浮点画布
         sum_img = np.zeros((canvas_h, canvas_w), dtype=np.float64)
         sum_weight = np.zeros((canvas_h, canvas_w), dtype=np.float64)
 
-        # 逐一添加图像（按原始顺序，连续图像共享最多重叠）
-        for i in range(n):
-            fname = os.path.basename(image_paths[i])
-            x_pos = int(round(global_x[i])) - canvas_x_min
-            y_pos = int(round(global_y[i])) - canvas_y_min
-            # 确保是 Python int
+        # 按 MST 遍历顺序添加（从根开始广度优先）
+        order = []
+        visited = [False] * n
+        from collections import deque
+        q = deque([root])
+        visited[root] = True
+        while q:
+            u = q.popleft()
+            order.append(u)
+            for v, _, _ in adj[u]:
+                if not visited[v]:
+                    visited[v] = True
+                    q.append(v)
+
+        for idx in order:
+            fname = os.path.basename(image_paths[idx])
+            x_pos = int(round(global_x[idx])) - canvas_x_min
+            y_pos = int(round(global_y[idx])) - canvas_y_min
             x_pos = int(x_pos)
             y_pos = int(y_pos)
-            print(f"\n  添加 [{i}] {fname} at ({x_pos}, {y_pos})")
-            self._blend_onto_canvas(sum_img, sum_weight, images[i], x_pos, y_pos)
+            print(f"\n  添加 [{idx}] {fname} at ({x_pos}, {y_pos})")
+            self._blend_onto_canvas(sum_img, sum_weight, images[idx], x_pos, y_pos)
 
-        # 最终归一化
         valid = sum_weight > 1e-6
         sum_img[valid] /= sum_weight[valid]
         result = np.clip(np.round(sum_img), 0, 255).astype(np.uint8)
