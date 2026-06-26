@@ -148,6 +148,65 @@ class SEMStitcher:
         return dx, dy, best_count, n_good
 
     # ================================================================
+    # 相位相关精细对齐（亚像素精度，频域方法，对噪点鲁棒）
+    # ================================================================
+    def _fine_align_phase(self, img1: np.ndarray, img2: np.ndarray,
+                          dx_coarse: float, dy_coarse: float) -> tuple:
+        """
+        在 SIFT+RANSAC 粗对齐基础上，用相位相关 (Phase Correlation)
+        做纯平移精细对齐。
+
+        相位相关在频域计算两张图的互功率谱，通过 FFT 直接定位
+        平移量，天然适合纯平移估计，对 SEM 噪点和重复纹理鲁棒。
+
+        img1, img2: 原始灰度图（不经 CLAHE，保留真实边缘位置）
+        返回: (dx_fine, dy_fine) 叠加到粗平移上的微调量
+        """
+        h1, w1 = img1.shape
+        h2, w2 = img2.shape
+
+        dx_int = int(round(dx_coarse))
+        dy_int = int(round(dy_coarse))
+
+        # 计算粗对齐后的重叠区域（img2 坐标）
+        ox1 = max(0, dx_int)
+        oy1 = max(0, dy_int)
+        ox2 = min(w2, w1 + dx_int)
+        oy2 = min(h2, h1 + dy_int)
+        ow = ox2 - ox1
+        oh = oy2 - oy1
+
+        # 重叠区需要足够大才能做可靠的相位相关
+        if ow < 60 or oh < 60:
+            return 0.0, 0.0
+
+        # 提取两张图的重叠区（img1 坐标系中对应位置）
+        i1_x1 = max(0, -dx_int)
+        i1_y1 = max(0, -dy_int)
+
+        # 转换为 float32（相位相关要求）
+        patch1 = img1[i1_y1:i1_y1 + oh, i1_x1:i1_x1 + ow].astype(np.float32)
+        patch2 = img2[oy1:oy1 + oh, ox1:ox1 + ow].astype(np.float32)
+
+        # Hann 窗：抑制 FFT 边缘效应
+        window = np.outer(np.hanning(oh), np.hanning(ow)).astype(np.float32)
+
+        # 相位相关
+        try:
+            shift, response = cv2.phaseCorrelate(
+                patch1 * window, patch2 * window
+            )
+            dx_fine = float(shift[0])
+            dy_fine = float(shift[1])
+            # 相位相关的峰值响应，值越高匹配越可信
+            if response < 0.05:
+                dx_fine, dy_fine = 0.0, 0.0
+        except cv2.error:
+            dx_fine, dy_fine = 0.0, 0.0
+
+        return dx_fine, dy_fine
+
+    # ================================================================
     # 线性羽化融合 (Linear Blending)
     def _blend_images(
         self,
@@ -316,20 +375,35 @@ class SEMStitcher:
     def _match_pair(self, img_a: np.ndarray, img_b: np.ndarray,
                     label_a: str = "A", label_b: str = "B") -> tuple:
         """
-        匹配相邻两张图像，返回相对平移量。
+        两步对齐法匹配相邻两张图像：
+          1) SIFT + FLANN + RANSAC → 粗对齐 (整数像素级)
+          2) 相位相关 (Phase Correlation) → 精细对齐 (亚像素级)
 
         img_a 平移到 img_b 坐标系的 (dx, dy)。
-
         返回: (dx, dy, inliers, n_good)
         """
-        kp_a, des_a = self._extract_features(self._preprocess(img_a))
-        kp_b, des_b = self._extract_features(self._preprocess(img_b))
+        # ---- 第一步：SIFT 粗对齐 ----
+        enhanced_a = self._preprocess(img_a)
+        enhanced_b = self._preprocess(img_b)
+        kp_a, des_a = self._extract_features(enhanced_a)
+        kp_b, des_b = self._extract_features(enhanced_b)
         dx, dy, inliers, n_good = self._compute_translation(kp_a, des_a, kp_b, des_b)
 
         print(f"  特征点: {label_a}={len(kp_a)}, {label_b}={len(kp_b)}")
-        print(f"  Good Matches: {n_good}, RANSAC 内点: {inliers}")
-        if dx is not None:
-            print(f"  相对平移: Δx={dx:.1f} px, Δy={dy:.1f} px")
+        print(f"  粗对齐: Good Matches={n_good}, RANSAC内点={inliers}, "
+              f"Δx={dx:.1f}, Δy={dy:.1f} px" if dx is not None else
+              f"  粗对齐: Good Matches={n_good}, RANSAC内点={inliers} (失败)")
+
+        if dx is None:
+            return dx, dy, inliers, n_good
+
+        # ---- 第二步：相位相关精细对齐（用原始图，保留真实边缘） ----
+        dx_fine, dy_fine = self._fine_align_phase(img_a, img_b, dx, dy)
+        dx += dx_fine
+        dy += dy_fine
+
+        if abs(dx_fine) > 0.01 or abs(dy_fine) > 0.01:
+            print(f"  精细对齐(相位相关): Δx={dx_fine:.2f}, Δy={dy_fine:.2f} px")
 
         return dx, dy, inliers, n_good
 
@@ -389,9 +463,14 @@ class SEMStitcher:
                 new_center_x = x_pos + w_new / 2.0
                 # 画布在左 → 画布权重从左到右 1→0，新图权重 0→1
                 if canvas_center_x <= new_center_x:
+                    # 画布在左：画布权重从左到右 1→0，新图权重 0→1
+                    # ★ 同步缩放 sum_img 和 sum_weight，避免曝光异常
+                    sum_img[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= (1.0 - ramp)
                     sum_weight[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= (1.0 - ramp)
                     w_new_mask[o_n_y1:o_n_y1 + oh, o_n_x1:o_n_x1 + ow] = ramp
                 else:
+                    # 画布在右：画布权重从左到右 0→1，新图权重 1→0
+                    sum_img[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= ramp
                     sum_weight[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= ramp
                     w_new_mask[o_n_y1:o_n_y1 + oh, o_n_x1:o_n_x1 + ow] = 1.0 - ramp
             else:
@@ -402,9 +481,13 @@ class SEMStitcher:
                 canvas_center_y = float(np.average(rows, weights=row_weights)) if total_w > 0 else oy1
                 new_center_y = y_pos + h_new / 2.0
                 if canvas_center_y <= new_center_y:
+                    # 画布在上：画布权重从上到下 1→0，新图权重 0→1
+                    sum_img[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= (1.0 - ramp)
                     sum_weight[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= (1.0 - ramp)
                     w_new_mask[o_n_y1:o_n_y1 + oh, o_n_x1:o_n_x1 + ow] = ramp
                 else:
+                    # 画布在下：画布权重从上到下 0→1，新图权重 1→0
+                    sum_img[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= ramp
                     sum_weight[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= ramp
                     w_new_mask[o_n_y1:o_n_y1 + oh, o_n_x1:o_n_x1 + ow] = 1.0 - ramp
 
