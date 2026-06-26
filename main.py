@@ -47,7 +47,8 @@ class SEMStitcher:
         self.sift = cv2.SIFT_create(
             nfeatures=sift_n_features,
             contrastThreshold=sift_contrast_threshold,
-            edgeThreshold=sift_edge_threshold,
+            edgeThreshold=200,    # 【关键修改1】从 10 改为 200，强迫 SIFT 保留圆孔边缘的特征点
+            sigma=2.0             # 【关键修改2】增加初始高斯模糊(默认1.6)，过滤掉微小划痕
         )
 
         # ---- FLANN ----
@@ -433,8 +434,6 @@ class SEMStitcher:
         enhanced_a = self._preprocess(img_a)
         enhanced_b = self._preprocess(img_b)
         dx_fine, dy_fine = self._fine_align_phase(enhanced_a, enhanced_b, dx, dy)
-        dx += dx_fine
-        dy += dy_fine
 
         if abs(dx_fine) > 0.01 or abs(dy_fine) > 0.01:
             print(f"  相位相关精调: Δx={dx_fine:.2f}, Δy={dy_fine:.2f} px")
@@ -637,19 +636,6 @@ class SEMStitcher:
         rx_s = f"X残差={rx[0]:.1f}" if len(rx) > 0 else "X确定"
         ry_s = f"Y残差={ry[0]:.1f}" if len(ry) > 0 else "Y确定"
         print(f"  {rx_s}, {ry_s} (rank X={rank_x}, Y={rank_y})")
-
-        # ---- 行级微调：上半部分往上挪 20px ----
-        y_vals = [float(y) for y in global_y]
-        y_sorted = sorted(y_vals)
-        max_gap, split_idx = max(
-            (y_sorted[i+1] - y_sorted[i], i) for i in range(len(y_sorted)-1)
-        )
-        split_y = (y_sorted[split_idx] + y_sorted[split_idx + 1]) / 2
-        upper_row = [i for i in range(n) if global_y[i] < split_y]
-        shift_y = -20.0
-        for i in upper_row:
-            global_y[i] += shift_y
-        print(f"  上半行 {[os.path.basename(image_paths[i]) for i in upper_row]} → Y {shift_y:.0f} px")
 
         for i in range(n):
             fname = os.path.basename(image_paths[i])
