@@ -1,0 +1,23 @@
+# 图片文件（不推送）
+*.tif
+*.tiff
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif
+
+# 拼接结果（每次运行会重新生成）
+stitched_*.tif
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
