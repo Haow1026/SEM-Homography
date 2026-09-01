@@ -7,11 +7,11 @@ SEM 图像拼接工具 (Image Stitching for SEM)
 - 顺序拼接：逐张增量拼接，支持任意数量图像
 """
 
+import argparse
+from collections import deque
 import cv2
 import numpy as np
 import os
-import sys
-import re
 
 
 # ============================================================
@@ -25,7 +25,7 @@ class SEMStitcher:
         # SIFT 参数
         sift_n_features=0,
         sift_contrast_threshold=0.01,  # 降低以适配边缘图
-        sift_edge_threshold=10,
+        sift_edge_threshold=200,
         # FLANN 参数
         flann_trees=5,
         flann_checks=100,
@@ -47,7 +47,7 @@ class SEMStitcher:
         self.sift = cv2.SIFT_create(
             nfeatures=sift_n_features,
             contrastThreshold=sift_contrast_threshold,
-            edgeThreshold=200,    # 【关键修改1】从 10 改为 200，强迫 SIFT 保留圆孔边缘的特征点
+            edgeThreshold=sift_edge_threshold,
             sigma=2.0             # 【关键修改2】增加初始高斯模糊(默认1.6)，过滤掉微小划痕
         )
 
@@ -555,197 +555,393 @@ class SEMStitcher:
                   f"content={actual_overlap_px}/{total_px} px)")
 
     # ================================================================
-    # 批量顺序拼接（连续匹配 + 全局定位）
+    # 配准图约束、全局定位与合成
     # ================================================================
-    # ================================================================
-    # 图优化全局定位 + 合成
-    # ================================================================
-    def stitch_sequence(self, image_paths: list) -> np.ndarray:
+    @staticmethod
+    def _grid_neighbor_pairs(n: int, grid_shape: tuple, serpentine: bool) -> set:
+        """Return index pairs for a row-major (optionally serpentine) grid."""
+        try:
+            rows, cols = grid_shape
+            rows, cols = int(rows), int(cols)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("grid_shape must be a (rows, cols) pair") from exc
+        if rows <= 0 or cols <= 0 or rows * cols != n:
+            raise ValueError(
+                f"grid_shape {grid_shape} does not match {n} input images"
+            )
+
+        grid = []
+        for row in range(rows):
+            indices = list(range(row * cols, (row + 1) * cols))
+            if serpentine and row % 2 == 1:
+                indices.reverse()
+            grid.append(indices)
+
+        pairs = set()
+        for row in range(rows):
+            for col in range(cols):
+                if col + 1 < cols:
+                    pairs.add(tuple(sorted((grid[row][col], grid[row][col + 1]))))
+                if row + 1 < rows:
+                    pairs.add(tuple(sorted((grid[row][col], grid[row + 1][col]))))
+        return pairs
+
+    @staticmethod
+    def _overlap_geometry(
+        img_a: np.ndarray, img_b: np.ndarray, dx: float, dy: float,
+    ) -> tuple:
+        """Return overlap width, height, and the longest-axis overlap ratio."""
+        h_a, w_a = img_a.shape
+        h_b, w_b = img_b.shape
+        overlap_w = max(0.0, min(dx + w_a, w_b) - max(dx, 0.0))
+        overlap_h = max(0.0, min(dy + h_a, h_b) - max(dy, 0.0))
+        axis_ratio = max(
+            overlap_w / min(w_a, w_b),
+            overlap_h / min(h_a, h_b),
+        )
+        return overlap_w, overlap_h, axis_ratio
+
+    @staticmethod
+    def _connected_order(n: int, edges: list, root: int) -> list:
+        """Return a BFS order for root's component."""
+        adjacency = [[] for _ in range(n)]
+        for _, i, j, _, _ in edges:
+            adjacency[i].append(j)
+            adjacency[j].append(i)
+
+        order = []
+        visited = [False] * n
+        queue = deque([root])
+        visited[root] = True
+        while queue:
+            node = queue.popleft()
+            order.append(node)
+            for neighbor in adjacency[node]:
+                if not visited[neighbor]:
+                    visited[neighbor] = True
+                    queue.append(neighbor)
+        return order
+
+    @staticmethod
+    def _select_anchor(n: int, edges: list) -> tuple:
+        """Choose the most connected image as the coordinate-system anchor."""
+        degree = [0] * n
+        for _, i, j, _, _ in edges:
+            degree[i] += 1
+            degree[j] += 1
+        return max(range(n), key=lambda index: degree[index]), degree
+
+    @staticmethod
+    def _solve_global_positions(n: int, edges: list, root: int) -> tuple:
+        """Solve weighted translation constraints with one anchored image."""
+        A_x, B_x, A_y, B_y = [], [], [], []
+        for quality, i, j, dx, dy in edges:
+            # Least squares squares the row coefficients. sqrt(quality) therefore
+            # gives the intended linear quality weight instead of quality**2.
+            weight = np.sqrt(float(quality))
+            row = np.zeros(n)
+            row[i] = -weight
+            row[j] = weight
+            A_x.append(row)
+            B_x.append(-weight * float(dx))
+            row = np.zeros(n)
+            row[i] = -weight
+            row[j] = weight
+            A_y.append(row)
+            B_y.append(-weight * float(dy))
+
+        constraint_weight = max(np.sqrt(float(q)) for q, _, _, _, _ in edges) * 1000.0
+        row = np.zeros(n)
+        row[root] = constraint_weight
+        A_x.append(row)
+        B_x.append(0.0)
+        A_y.append(row)
+        B_y.append(0.0)
+
+        A_x = np.array(A_x)
+        B_x = np.array(B_x)
+        A_y = np.array(A_y)
+        B_y = np.array(B_y)
+        sol_x, residual_x, rank_x, _ = np.linalg.lstsq(A_x, B_x, rcond=None)
+        sol_y, residual_y, rank_y, _ = np.linalg.lstsq(A_y, B_y, rcond=None)
+        return (
+            sol_x.tolist(), sol_y.tolist(), residual_x, residual_y,
+            rank_x, rank_y, A_x.shape,
+        )
+
+    @staticmethod
+    def _edge_residuals(edges: list, global_x: list, global_y: list) -> list:
+        """Measure each translation constraint's error in the global solution."""
+        residuals = []
+        for edge in edges:
+            _, i, j, dx, dy = edge
+            error_x = (global_x[i] - global_x[j]) - dx
+            error_y = (global_y[i] - global_y[j]) - dy
+            residuals.append((float(np.hypot(error_x, error_y)), edge))
+        return residuals
+
+    def stitch_sequence(
+        self,
+        image_paths: list,
+        grid_shape: tuple = None,
+        serpentine: bool = False,
+        min_axis_overlap_ratio: float = 0.70,
+        residual_threshold: float = 10.0,
+    ) -> np.ndarray:
         """
-        拼接多 images（支持 2D 网格）。
+        Stitch multiple images with pairwise translation constraints.
 
-        策略（解决一维链式累加误差）：
-        1. 两两全对匹配所有可能重叠的图像对
-        2. 用匹配质量（RANSAC 内点数）构建最大生成树 (MST)
-        3. 从 MST 根节点 BFS 遍历，分配全局坐标
-        4. 按坐标逐一将图像Add到画布，保留羽化融合
-
-        这样拼接路径永远选择"最可靠的边缘"，切断误差累积。
+        Small corner-only overlaps are rejected by default because they are prone
+        to false SIFT matches. Supply ``grid_shape`` and ``serpentine=True`` for
+        a known snake-scanned grid to match only direct neighbours.
         """
         n = len(image_paths)
         if n < 2:
-            raise ValueError("至少需要 2  images才能拼接")
+            raise ValueError("At least two images are required for stitching")
+        if not 0.0 <= min_axis_overlap_ratio <= 1.0:
+            raise ValueError("min_axis_overlap_ratio must be between 0 and 1")
+        if residual_threshold <= 0:
+            raise ValueError("residual_threshold must be positive")
 
-        self._log(f"\n{'='*60}")
+        allowed_pairs = None
+        if grid_shape is not None:
+            allowed_pairs = self._grid_neighbor_pairs(n, grid_shape, serpentine)
+
+        self._log(f"\n{'=' * 60}")
         self._log(f"Starting multi-stitch, {n} images")
-        self._log(f"Strategy: pairwise match -> graph optimization -> global positioning -> blend")
-        self._log(f"{'='*60}")
+        self._log("Strategy: screened pairwise match -> robust global positioning -> blend")
+        if allowed_pairs is not None:
+            self._log(
+                f"Grid constraint: {grid_shape[0]}x{grid_shape[1]}, "
+                f"serpentine={serpentine} ({len(allowed_pairs)} direct-neighbour pairs)"
+            )
+        self._log(f"{'=' * 60}")
 
-        # ---- 阶段 1：加载所有图像 ----
+        # ---- Phase 1: load images ----
         images = []
-        for p in image_paths:
-            img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+        for path in image_paths:
+            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
             if img is None:
-                raise FileNotFoundError(f"无法读取图像: {p}")
+                raise FileNotFoundError(f"Cannot read image: {path}")
             images.append(img)
-            self._log(f"  Loaded: {os.path.basename(p)} ({img.shape[1]}x{img.shape[0]})")
+            self._log(f"  Loaded: {os.path.basename(path)} ({img.shape[1]}x{img.shape[0]})")
 
-        # ---- 阶段 2：两两全对匹配（N×(N-1)/2  pairs) ----
-        self._log(f"\n--- Phase 1: Pairwise matching ({n*(n-1)//2} pairs) ---")
-        edges = []  # (quality, i, j, dx, dy)  quality = RANSAC 内点数
+        candidate_count = len(allowed_pairs) if allowed_pairs is not None else n * (n - 1) // 2
+        self._log(f"\n--- Phase 1: Pairwise matching ({candidate_count} pairs) ---")
+        edges = []  # (quality, i, j, dx, dy), where img_i is shifted by (dx, dy) into img_j.
 
         for i in range(n):
             for j in range(i + 1, n):
+                if allowed_pairs is not None and (i, j) not in allowed_pairs:
+                    continue
+
                 fname_i = os.path.basename(image_paths[i])
                 fname_j = os.path.basename(image_paths[j])
                 self._log(f"\n  Try [{i}↔{j}]: {fname_i} ↔ {fname_j}")
-
                 dx, dy, quality = self._try_match_pair(
                     images[i], images[j], label_a=fname_i, label_b=fname_j
                 )
 
-                if dx is not None and quality >= 8:
-                    edges.append((quality, i, j, dx, dy))
-                    self._log(f"  OK  quality={quality}")
-                else:
-                    self._log(f"  No match / no overlap")
+                if dx is None or quality < 8:
+                    self._log("  No match / no overlap")
+                    continue
+
+                overlap_w, overlap_h, axis_ratio = self._overlap_geometry(
+                    images[i], images[j], dx, dy
+                )
+                if axis_ratio < min_axis_overlap_ratio:
+                    self._log(
+                        f"  Reject corner-only overlap: {overlap_w:.0f}x{overlap_h:.0f} px, "
+                        f"axis ratio={axis_ratio:.2f} < {min_axis_overlap_ratio:.2f}"
+                    )
+                    continue
+
+                edges.append((quality, i, j, dx, dy))
+                self._log(
+                    f"  OK quality={quality}, overlap={overlap_w:.0f}x{overlap_h:.0f} px, "
+                    f"axis ratio={axis_ratio:.2f}"
+                )
 
         if len(edges) < n - 1:
             raise RuntimeError(
-                f"匹配边数量不足 ({len(edges)} < {n-1})，无法构成连通图！"
-                f"请检查图像重叠是否足够。"
+                f"Only {len(edges)} reliable edges for {n} images; cannot form a connected graph."
             )
 
-        # ---- 阶段 3：加权最小二乘全局平差 ----
+        root, degree = self._select_anchor(n, edges)
+        order = self._connected_order(n, edges, root)
+        if len(order) != n:
+            missing = [os.path.basename(image_paths[index]) for index in range(n) if index not in order]
+            raise RuntimeError(
+                "Reliable matches do not connect every image. Missing: " + ", ".join(missing)
+            )
+
+        # ---- Phase 2: weighted least squares and one robust outlier-pruning pass ----
         self._log(f"\n--- Phase 2: Weighted least squares ({len(edges)} edges) ---")
+        for pass_index in range(2):
+            root, degree = self._select_anchor(n, edges)
+            (
+                global_x, global_y, residual_x, residual_y,
+                rank_x, rank_y, matrix_shape,
+            ) = self._solve_global_positions(n, edges, root)
 
-        degree = [0] * n
-        for _, i, j, _, _ in edges:
-            degree[i] += 1; degree[j] += 1
-        root = max(range(n), key=lambda x: degree[x])
-        self._log(f"  Anchor: [{root}] {os.path.basename(image_paths[root])} (degree={degree[root]})")
+            if rank_x != n or rank_y != n:
+                raise RuntimeError(
+                    f"Global positioning is rank-deficient (rank X={rank_x}, Y={rank_y})."
+                )
 
-        A_x, B_x, A_y, B_y = [], [], [], []
-        for quality, i, j, dx, dy in edges:
-            w = float(quality)
-            row = np.zeros(n); row[i] = -w; row[j] = w
-            A_x.append(row); B_x.append(-w * float(dx))
-            row = np.zeros(n); row[i] = -w; row[j] = w
-            A_y.append(row); B_y.append(-w * float(dy))
+            if pass_index == 0:
+                self._log(
+                    f"  Anchor: [{root}] {os.path.basename(image_paths[root])} "
+                    f"(degree={degree[root]})"
+                )
+                self._log(f"  Matrix: {matrix_shape[0]} eqns x {matrix_shape[1]} unknowns")
 
-        constraint_w = float(max(q for q, _, _, _, _ in edges)) * 1000.0
-        row = np.zeros(n); row[root] = constraint_w
-        A_x.append(row); B_x.append(0.0)
-        A_y.append(row); B_y.append(0.0)
+            edge_residuals = self._edge_residuals(edges, global_x, global_y)
+            worst_residual = max(residual for residual, _ in edge_residuals)
+            self._log(
+                f"  Pass {pass_index + 1}: worst edge residual={worst_residual:.2f} px "
+                f"(threshold={residual_threshold:.2f} px)"
+            )
+            outliers = [edge for residual, edge in edge_residuals if residual > residual_threshold]
+            if not outliers or pass_index == 1:
+                break
 
-        A_x = np.array(A_x); B_x = np.array(B_x)
-        A_y = np.array(A_y); B_y = np.array(B_y)
-        self._log(f"  Matrix: {A_x.shape[0]} eqns x {n} unknowns")
+            retained_edges = [edge for edge in edges if edge not in outliers]
+            retained_order = self._connected_order(n, retained_edges, root)
+            if len(retained_order) != n:
+                self._log("  Keep residual outliers: removing them would disconnect the image graph")
+                break
 
-        sol_x, rx, rank_x, _ = np.linalg.lstsq(A_x, B_x, rcond=None)
-        sol_y, ry, rank_y, _ = np.linalg.lstsq(A_y, B_y, rcond=None)
-        global_x = sol_x.tolist()
-        global_y = sol_y.tolist()
+            self._log(f"  Pruning {len(outliers)} inconsistent edge(s) and solving again:")
+            for residual, edge in edge_residuals:
+                if edge in outliers:
+                    _, i, j, _, _ = edge
+                    self._log(
+                        f"    drop [{i}↔{j}] {os.path.basename(image_paths[i])} ↔ "
+                        f"{os.path.basename(image_paths[j])}: residual={residual:.2f} px"
+                    )
+            edges = retained_edges
 
-        rx_s = f"X残差={rx[0]:.1f}" if len(rx) > 0 else "X确定"
-        ry_s = f"Y残差={ry[0]:.1f}" if len(ry) > 0 else "Y确定"
-        self._log(f"  {rx_s}, {ry_s} (rank X={rank_x}, Y={rank_y})")
+        residual_x_text = f"X residual={residual_x[0]:.1f}" if len(residual_x) > 0 else "X determined"
+        residual_y_text = f"Y residual={residual_y[0]:.1f}" if len(residual_y) > 0 else "Y determined"
+        self._log(f"  {residual_x_text}, {residual_y_text} (rank X={rank_x}, Y={rank_y})")
+        for index in range(n):
+            self._log(
+                f"  [{index}] {os.path.basename(image_paths[index])}: "
+                f"({global_x[index]:.1f}, {global_y[index]:.1f})"
+            )
 
-        for i in range(n):
-            fname = os.path.basename(image_paths[i])
-            self._log(f"  [{i}] {fname}: ({global_x[i]:.1f}, {global_y[i]:.1f})")
-
-        # ---- 阶段 4：预分配画布 + 逐一羽化融合 ----
-        self._log(f"\n--- Phase 3: Blend composition ---")
-
-        all_left = []
-        all_top = []
-        all_right = []
-        all_bottom = []
-        for i in range(n):
-            gx = global_x[i]
-            gy = global_y[i]
-            h, w = images[i].shape
+        # ---- Phase 3: pre-allocate canvas and blend in graph order ----
+        self._log("\n--- Phase 3: Blend composition ---")
+        all_left, all_top, all_right, all_bottom = [], [], [], []
+        for index, (gx, gy) in enumerate(zip(global_x, global_y)):
+            height, width = images[index].shape
             all_left.append(gx)
             all_top.append(gy)
-            all_right.append(gx + w)
-            all_bottom.append(gy + h)
+            all_right.append(gx + width)
+            all_bottom.append(gy + height)
 
         canvas_x_min = int(np.floor(min(all_left)))
         canvas_y_min = int(np.floor(min(all_top)))
         canvas_w = int(np.ceil(max(all_right) - canvas_x_min))
         canvas_h = int(np.ceil(max(all_bottom) - canvas_y_min))
-
         self._log(f"  Canvas: {canvas_w} x {canvas_h}")
 
         sum_img = np.zeros((canvas_h, canvas_w), dtype=np.float64)
         sum_weight = np.zeros((canvas_h, canvas_w), dtype=np.float64)
-
-        # 按 BFS 顺序Add（从根沿所有成功边广度优先）
-        adj_all = [[] for _ in range(n)]
-        for _, i, j, _, _ in edges:
-            adj_all[i].append(j); adj_all[j].append(i)
-        order = []
-        visited = [False] * n
-        from collections import deque
-        q = deque([root])
-        visited[root] = True
-        while q:
-            u = q.popleft()
-            order.append(u)
-            for v in adj_all[u]:
-                if not visited[v]:
-                    visited[v] = True
-                    q.append(v)
-
-        for idx in order:
-            fname = os.path.basename(image_paths[idx])
-            x_pos = int(round(global_x[idx])) - canvas_x_min
-            y_pos = int(round(global_y[idx])) - canvas_y_min
-            x_pos = int(x_pos)
-            y_pos = int(y_pos)
-            self._log(f"\n  Add [{idx}] {fname} at ({x_pos}, {y_pos})")
-            self._blend_onto_canvas(sum_img, sum_weight, images[idx], x_pos, y_pos)
+        order = self._connected_order(n, edges, root)
+        for index in order:
+            fname = os.path.basename(image_paths[index])
+            x_pos = int(round(global_x[index])) - canvas_x_min
+            y_pos = int(round(global_y[index])) - canvas_y_min
+            self._log(f"\n  Add [{index}] {fname} at ({x_pos}, {y_pos})")
+            self._blend_onto_canvas(sum_img, sum_weight, images[index], x_pos, y_pos)
 
         valid = sum_weight > 1e-6
         sum_img[valid] /= sum_weight[valid]
         result = np.clip(np.round(sum_img), 0, 255).astype(np.uint8)
 
-        self._log(f"\n{'='*60}")
+        self._log(f"\n{'=' * 60}")
         self._log(f"All {n} images stitched!")
         self._log(f"Final size: {result.shape[1]} x {result.shape[0]}")
-        self._log(f"{'='*60}")
-
+        self._log(f"{'=' * 60}")
         return result
 
 
 # ============================================================
-# 主程序入口
+# 命令行入口
 # ============================================================
+def _parse_grid_shape(value: str) -> tuple:
+    """Parse a CLI grid specification such as ``3x3``."""
+    try:
+        rows_text, cols_text = value.lower().split("x")
+        rows, cols = int(rows_text), int(cols_text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("grid must use ROWSxCOLS, e.g. 3x3") from exc
+    if rows <= 0 or cols <= 0:
+        raise argparse.ArgumentTypeError("grid dimensions must be positive")
+    return rows, cols
+
+
 if __name__ == "__main__":
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    OUTPUT_PATH = os.path.join(BASE_DIR, "stitched_panorama.tif")
+    parser = argparse.ArgumentParser(
+        description="Stitch SEM images with pure-translation alignment."
+    )
+    parser.add_argument(
+        "--grid",
+        type=_parse_grid_shape,
+        metavar="ROWSxCOLS",
+        help="match only direct neighbours in a known grid",
+    )
+    parser.add_argument(
+        "--serpentine",
+        action="store_true",
+        help="interpret alternate grid rows in reverse acquisition order",
+    )
+    parser.add_argument(
+        "--min-axis-overlap",
+        type=float,
+        default=0.70,
+        help="reject matches unless one overlap axis reaches this fraction (default: 0.70)",
+    )
+    parser.add_argument(
+        "--residual-threshold",
+        type=float,
+        default=10.0,
+        help="prune connected graph edges above this global residual in pixels (default: 10)",
+    )
+    parser.add_argument("images", nargs="+", help="input TIFF image paths in acquisition order")
+    args = parser.parse_args()
 
-    if len(sys.argv) < 3:
-        print("Usage: python3 main.py <img1.tif> <img2.tif> [img3.tif ...]")
-        print("  Stitch multiple TIFF images using pure-translation alignment.")
-        print("  For the GUI, run: python3 gui.py")
-        sys.exit(1)
+    if len(args.images) < 2:
+        parser.error("at least two images are required")
+    if args.serpentine and args.grid is None:
+        parser.error("--serpentine requires --grid")
+    if args.grid is not None and args.grid[0] * args.grid[1] != len(args.images):
+        parser.error(
+            f"grid {args.grid[0]}x{args.grid[1]} requires {args.grid[0] * args.grid[1]} images, "
+            f"but received {len(args.images)}"
+        )
+    if not 0.0 <= args.min_axis_overlap <= 1.0:
+        parser.error("--min-axis-overlap must be between 0 and 1")
+    if args.residual_threshold <= 0:
+        parser.error("--residual-threshold must be positive")
 
-    image_paths = [os.path.abspath(p) for p in sys.argv[1:]]
-    for p in image_paths:
-        if not os.path.isfile(p):
-            print(f"File not found: {p}")
-            sys.exit(1)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    output_path = os.path.join(base_dir, "stitched_panorama.tif")
+    image_paths = [os.path.abspath(path) for path in args.images]
+    for path in image_paths:
+        if not os.path.isfile(path):
+            parser.error(f"file not found: {path}")
 
     print(f"Found {len(image_paths)} images to stitch:")
-    for p in image_paths:
-        print(f"  - {os.path.basename(p)}")
+    for path in image_paths:
+        print(f"  - {os.path.basename(path)}")
 
     stitcher = SEMStitcher(
         sift_n_features=0,
         sift_contrast_threshold=0.01,
-        sift_edge_threshold=10,
+        sift_edge_threshold=200,
         flann_trees=5,
         flann_checks=100,
         lowe_ratio=0.75,
@@ -755,10 +951,17 @@ if __name__ == "__main__":
         clahe_tile_size=(8, 8),
     )
 
-    result = stitcher.stitch_sequence(image_paths)
+    result = stitcher.stitch_sequence(
+        image_paths,
+        grid_shape=args.grid,
+        serpentine=args.serpentine,
+        min_axis_overlap_ratio=args.min_axis_overlap,
+        residual_threshold=args.residual_threshold,
+    )
 
-    cv2.imwrite(OUTPUT_PATH, result)
-    print(f"\nResult saved to: {OUTPUT_PATH}")
+    if not cv2.imwrite(output_path, result):
+        raise RuntimeError(f"Failed to save result to: {output_path}")
+    print(f"\nResult saved to: {output_path}")
 
     # 预览
     try:
