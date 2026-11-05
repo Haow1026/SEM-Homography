@@ -471,6 +471,9 @@ class SEMStitcherGUI(ctk.CTk):
         for widget in (self.rows_entry, self.cols_entry, self.check_serpentine, self.check_rtl):
             widget.configure(state=grid_state)
         succeeded = self.task.state == TaskState.SUCCEEDED
+        self.progress_bar.configure(mode='indeterminate' if busy else 'determinate')
+        if not busy:
+            self.progress_bar.set(1 if succeeded else 0)
         self.btn_start.configure(state='normal' if self._layout_valid and not busy else 'disabled',
                                  text=self.t('btn_start_disabled' if self.task.busy else
                                              'btn_restart' if succeeded else 'btn_start'),
@@ -798,8 +801,12 @@ class SEMStitcherGUI(ctk.CTk):
             resized = display_gray(resized.astype(np.float32), np.ones(resized.shape, dtype=bool),
                                    self._preview_limits)
         pil_img = Image.fromarray(resized)
+        # Tk geometry is in screen pixels; CTkImage.size is in logical units.
+        # Avoid applying Windows display scaling a second time to the preview.
+        widget_scale = ctk.ScalingTracker.get_widget_scaling(self)
+        display_size = (max(1, int(new_w / widget_scale)), max(1, int(new_h / widget_scale)))
         ctk_img = ctk.CTkImage(
-            light_image=pil_img, dark_image=pil_img, size=(new_w, new_h)
+            light_image=pil_img, dark_image=pil_img, size=display_size
         )
         self.preview_label.configure(image=ctk_img, text="")
         self.preview_label.image = ctk_img

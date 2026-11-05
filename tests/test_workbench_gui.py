@@ -145,15 +145,22 @@ class WorkbenchTests(unittest.TestCase):
         original = source.copy()
         self.success(source)
         self.app._preview_key = None
-        with patch('gui.display_range', wraps=display_range) as limits, \
+        # CI desktops can clamp even a requested 1600px window. Simulate a
+        # larger viewport so removing the old 700px cap is tested everywhere.
+        with patch.object(self.app.preview_label, 'winfo_width', return_value=1200), \
+             patch.object(self.app.preview_label, 'winfo_height', return_value=750), \
+             patch('gui.display_range', wraps=display_range) as limits, \
              patch('gui.display_gray', wraps=display_gray) as gray:
             self.app._update_preview()
             self.app._update_preview()
-        width, height = self.app.preview_label.image.cget('size')
+        photo = self.app.preview_label.image.create_scaled_photo_image(
+            ctk.ScalingTracker.get_widget_scaling(self.app), 'dark')
+        width, height = photo.width(), photo.height()
         self.assertGreater(width, 700)
-        self.assertLessEqual(width, self.app.preview_label.winfo_width()-24)
-        self.assertLessEqual(height, self.app.preview_label.winfo_height()-24)
-        self.assertEqual(gray.call_args.args[0].shape, (height, width))
+        self.assertLessEqual(width, 1200-24)
+        self.assertLessEqual(height, 750-24)
+        image_w, image_h = self.app.preview_label.image.cget('light_image').size
+        self.assertEqual(gray.call_args.args[0].shape, (image_h, image_w))
         self.assertEqual(limits.call_count, 1)
         np.testing.assert_array_equal(source, original)
 
@@ -167,6 +174,21 @@ class WorkbenchTests(unittest.TestCase):
         self.assertIsNone(self.app._preview_limits)
         self.assertIsNone(self.app._preview_key)
         np.testing.assert_array_equal(source, np.full(source.shape, 42000, np.uint16))
+
+    def test_scaled_display_does_not_enlarge_preview_past_the_canvas(self):
+        self.show('1600x950')
+        source = self.success(np.full((900, 1600), 42000, np.uint16))
+        try:
+            ctk.set_widget_scaling(1.5)
+            self.app.update()
+            self.app._update_preview()
+            photo = self.app.preview_label.image.create_scaled_photo_image(
+                ctk.ScalingTracker.get_widget_scaling(self.app), 'dark')
+            self.assertLessEqual(photo.width(), self.app.preview_label.winfo_width()-24)
+            self.assertLessEqual(photo.height(), self.app.preview_label.winfo_height()-24)
+            self.assertIs(self.app.stitched_result, source)
+        finally:
+            ctk.set_widget_scaling(1.0)
 
 
 if __name__ == '__main__':
