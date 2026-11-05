@@ -2,19 +2,19 @@
 SEM Image Stitching Tool — Mac Desktop GUI
 ===========================================
 CustomTkinter dark-mode interface: file selection, real-time log,
-async stitching, preview & export.  Supports en / 繁體中文 / 日本語.
+async stitching, preview & export.  Supports en / 简体中文 / 日本語.
 """
 
 import os
-import re
 import locale
-import threading
+import tkinter as tk
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from PIL import Image
 import numpy as np
 
 from main import SEMStitcher
+from stitching_task import StitchRequest, StitchTask, TaskState, natural_sort
 
 # ============================================================
 # 多语言翻译表  i18n
@@ -112,20 +112,81 @@ LANG = {
     },
 }
 
+LANG['en'].update({
+    'subtitle': 'Check acquisition order and scan layout before stitching',
+    'tab_files': 'Files & layout', 'tab_log': 'Log',
+    'grid_enabled': 'Use a known grid', 'rows': 'Rows', 'cols': 'Columns',
+    'serpentine': 'Serpentine scan', 'first_rtl': 'First row: right to left',
+    'btn_up': 'Move up', 'btn_down': 'Move down', 'btn_reverse': 'Reverse', 'btn_sort': 'Sort by name',
+    'order_hint': 'List = acquisition order; select a file to move it.',
+    'layout_hint': 'Top row first; numbers refer to the file list.',
+    'layout_auto': 'Automatic matching (no grid constraint)',
+    'layout_empty': 'Select at least two images to preview the layout.',
+    'layout_grid_reset': 'The new image count does not fit the previous grid. Automatic matching is enabled; set a new grid if needed.',
+    'grid_positive': 'Rows and columns must be positive whole numbers.',
+    'grid_count': 'Grid needs {expected} images; {actual} selected.',
+    'msg_settings': 'Check scan settings', 'btn_cancel': 'Cancel', 'btn_cancelling': 'Cancelling…',
+    'status_idle': 'Select images to begin', 'status_ready': 'Ready',
+    'status_running': 'Stitching…', 'status_cancelling': 'Cancelling; waiting for the current step…',
+    'status_succeeded': 'Complete — ready to export', 'status_failed': 'Failed — check the log',
+    'status_cancelled': 'Cancelled — no result to export', 'log_cancelled': 'Stitching cancelled.',
+    'log_cancelling': 'Cancellation requested. Waiting for the current operation to finish.',
+})
+LANG['zh-Hans'].update({
+    'subtitle': '开始前请核对文件采集顺序和扫描布局',
+    'tab_files': '文件与布局', 'tab_log': '运行日志',
+    'grid_enabled': '使用已知网格', 'rows': '行数', 'cols': '列数',
+    'serpentine': '蛇形扫描', 'first_rtl': '首行从右向左',
+    'btn_up': '上移', 'btn_down': '下移', 'btn_reverse': '倒序', 'btn_sort': '按文件名排序',
+    'order_hint': '列表为采集顺序；选中文件后可调整位置。',
+    'layout_hint': '上方为首行；数字对应文件列表编号。',
+    'layout_auto': '自动匹配（不限制网格邻接关系）',
+    'layout_empty': '选择至少两张图像后预览布局。',
+    'layout_grid_reset': '新批次图像数量与原网格不符，已切换为自动匹配；如需网格，请重新设置行列数。',
+    'grid_positive': '行数和列数必须为正整数。',
+    'grid_count': '网格需要 {expected} 张图像，当前选择 {actual} 张。',
+    'msg_settings': '请检查扫描设置', 'btn_cancel': '取消', 'btn_cancelling': '正在取消…',
+    'status_idle': '请选择图像', 'status_ready': '准备就绪',
+    'status_running': '正在拼接…', 'status_cancelling': '正在取消，等待当前步骤结束…',
+    'status_succeeded': '拼接完成，可以导出', 'status_failed': '拼接失败，请查看日志',
+    'status_cancelled': '已取消，无可导出的结果', 'log_cancelled': '拼接已取消。',
+    'log_cancelling': '已请求取消，等待当前操作完成。',
+})
+LANG['ja'].update({
+    'subtitle': '開始前に取得順序とスキャン配置を確認してください',
+    'tab_files': 'ファイルと配置', 'tab_log': 'ログ',
+    'grid_enabled': '既知のグリッドを使用', 'rows': '行数', 'cols': '列数',
+    'serpentine': '蛇行スキャン', 'first_rtl': '最初の行は右から左',
+    'btn_up': '上へ', 'btn_down': '下へ', 'btn_reverse': '逆順', 'btn_sort': '名前順',
+    'order_hint': '一覧は取得順です。選択して順序を変更できます。',
+    'layout_hint': '上から順に表示。番号はファイル一覧に対応します。',
+    'layout_auto': '自動マッチング（グリッド制約なし）',
+    'layout_empty': '画像を2枚以上選択すると配置を表示します。',
+    'layout_grid_reset': '新しい画像数が以前のグリッドと異なるため自動マッチングに切り替えました。必要に応じてグリッドを再設定してください。',
+    'grid_positive': '行数と列数は正の整数で指定してください。',
+    'grid_count': 'グリッドには {expected} 枚必要です。選択済み: {actual} 枚。',
+    'msg_settings': 'スキャン設定を確認', 'btn_cancel': 'キャンセル', 'btn_cancelling': 'キャンセル中…',
+    'status_idle': '画像を選択してください', 'status_ready': '準備完了',
+    'status_running': '処理中…', 'status_cancelling': '現在の処理の終了を待っています…',
+    'status_succeeded': '完了 — 書き出し可能', 'status_failed': '失敗 — ログを確認',
+    'status_cancelled': 'キャンセル済み — 結果なし', 'log_cancelled': '処理をキャンセルしました。',
+    'log_cancelling': 'キャンセルを要求しました。現在の処理の終了を待っています。',
+})
+
 # ============================================================
 # 全局配置
 # ============================================================
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-WIN_WIDTH, WIN_HEIGHT = 1050, 750
+WIN_WIDTH, WIN_HEIGHT = 1180, 760
 PREVIEW_MAX = 700
 
 
 def _detect_lang():
     """Auto-detect system language, fallback to English."""
     try:
-        loc = locale.getdefaultlocale()[0] or ""
+        loc = locale.getlocale()[0] or ""
     except Exception:
         loc = ""
     if loc.startswith("zh"):
@@ -142,326 +203,422 @@ class SEMStitcherGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.lang = _detect_lang()
-        self._apply_title()
         self.geometry(f"{WIN_WIDTH}x{WIN_HEIGHT}")
-        self.minsize(950, 600)
-
-        # ---- 状态 ----
+        self.minsize(1050, 700)
         self.image_paths = []
-        self.stitched_result = None
-        self.is_running = False
-        self.stitcher_thread = None
-
-        # ---- 保存所有需要翻译的 widget 引用 ----
+        self.task = StitchTask()
+        self._closing = False
+        self._poll_id = None
+        self._preview_id = None
+        self._layout_valid = False
+        self._layout_notice = False
         self._i18n_widgets = {}
-
-        # ---- 构建界面 ----
+        self.use_grid = tk.BooleanVar(self, value=False)
+        self.rows = tk.StringVar(self, value='3')
+        self.cols = tk.StringVar(self, value='3')
+        self.serpentine = tk.BooleanVar(self, value=False)
+        self.first_rtl = tk.BooleanVar(self, value=False)
         self._build_ui()
+        self.rows.trace_add('write', self._on_inputs_changed)
+        self.cols.trace_add('write', self._on_inputs_changed)
+        self.protocol('WM_DELETE_WINDOW', self._on_close)
         self._apply_language()
 
-    # ================================================================
-    # 翻译辅助
-    # ================================================================
-    def t(self, key: str, **fmt) -> str:
-        """Get translated string for key, with optional formatting."""
-        s = LANG.get(self.lang, LANG["en"]).get(key, key)
-        if fmt:
-            s = s.format(**fmt)
-        return s
+    @property
+    def stitched_result(self):
+        return self.task.result
 
-    def _apply_title(self):
-        self.title(LANG.get(self.lang, LANG["en"])["title"])
+    def t(self, key, **fmt):
+        return LANG[self.lang].get(key, key).format(**fmt)
 
-    def _apply_language(self):
-        """Refresh all UI text for current language."""
-        self._apply_title()
-        for widget, (key, fmt) in self._i18n_widgets.items():
-            text = self.t(key, **fmt)
-            try:
-                widget.configure(text=text)
-            except Exception:
-                pass  # widget may have been destroyed
-        if not self.is_running and self.stitched_result is None:
-            self.lbl_count.configure(text=self.t("lbl_none"))
-        elif self.stitched_result is not None:
-            h, w = self.stitched_result.shape
-            self.lbl_size.configure(text=self.t("lbl_size", w=w, h=h))
-
-    def _reg(self, widget, key: str, **fmt):
-        """Register a widget for i18n updates."""
+    def _reg(self, widget, key, **fmt):
         self._i18n_widgets[widget] = (key, fmt)
 
-    def _set_lang(self, choice: str):
-        lang_map = {"English": "en", "简体中文": "zh-Hans", "日本語": "ja"}
-        self.lang = lang_map.get(choice, "en")
+    def _apply_language(self):
+        self.title(self.t('title'))
+        for widget, (key, fmt) in self._i18n_widgets.items():
+            widget.configure(text=self.t(key, **fmt))
+        for key, old_name in list(self._tab_names.items()):
+            new_name = self.t(key)
+            if old_name != new_name:
+                self.tabs.rename(old_name, new_name)
+                self._tab_names[key] = new_name
+        self._refresh_layout()
+        self._render_state()
+        if self.stitched_result is None:
+            self.preview_label.configure(text=self.t('preview_placeholder'))
+        else:
+            h, w = self.stitched_result.shape
+            self.lbl_size.configure(text=self.t('lbl_size', w=w, h=h))
+
+    def _set_lang(self, choice):
+        self.lang = {'English': 'en', '简体中文': 'zh-Hans', '日本語': 'ja'}[choice]
         self._apply_language()
 
-    # ================================================================
-    # 构建 UI
-    # ================================================================
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=3)
         self.grid_columnconfigure(1, weight=2)
         self.grid_rowconfigure(0, weight=1)
+        left = ctk.CTkFrame(self)
+        left.grid(row=0, column=0, padx=(15, 7), pady=15, sticky='nsew')
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(2, weight=1)
+        heading = ctk.CTkLabel(left, text='', font=ctk.CTkFont(size=20, weight='bold'))
+        heading.grid(row=0, column=0, padx=18, pady=(15, 0), sticky='w')
+        self._reg(heading, 'heading')
+        header = ctk.CTkFrame(left, fg_color='transparent')
+        header.grid(row=1, column=0, padx=15, pady=(5, 0), sticky='ew')
+        subtitle = ctk.CTkLabel(header, text='', text_color='gray70')
+        subtitle.pack(anchor='w', pady=(0, 8))
+        self._reg(subtitle, 'subtitle')
+        self.btn_select = ctk.CTkButton(header, text='', command=self._on_select_files)
+        self.btn_select.pack(side='left')
+        self._reg(self.btn_select, 'btn_select')
+        self.lbl_count = ctk.CTkLabel(header, text='')
+        self.lbl_count.pack(side='left', padx=12)
 
-        # ===== 语言选择器（右上角） =====
-        lang_frame = ctk.CTkFrame(self, fg_color="transparent")
-        lang_frame.grid(row=0, column=1, padx=(7, 22), pady=(15, 0), sticky="ne")
-        lbl_lang = ctk.CTkLabel(
-            lang_frame, text="", font=ctk.CTkFont(size=11), text_color="gray60",
-        )
-        lbl_lang.pack(side="left", padx=(0, 5))
-        self._reg(lbl_lang, "lang_label")
+        self.tabs = ctk.CTkTabview(left)
+        self.tabs.grid(row=2, column=0, padx=12, pady=8, sticky='nsew')
+        self._tab_names = {key: self.t(key) for key in ('tab_files', 'tab_log')}
+        files = self.tabs.add(self._tab_names['tab_files'])
+        logs = self.tabs.add(self._tab_names['tab_log'])
+        files.grid_columnconfigure(0, weight=1)
+        files.grid_rowconfigure(2, weight=1)
+        settings = ctk.CTkFrame(files)
+        settings.grid(row=0, column=0, sticky='ew', pady=(0, 8))
+        self.grid_switch = ctk.CTkSwitch(settings, text='', variable=self.use_grid, command=self._on_inputs_changed)
+        self.grid_switch.grid(row=0, column=0, columnspan=4, padx=12, pady=(10, 8), sticky='w')
+        self._reg(self.grid_switch, 'grid_enabled')
+        for col, key, variable in ((0, 'rows', self.rows), (2, 'cols', self.cols)):
+            label = ctk.CTkLabel(settings, text='')
+            label.grid(row=1, column=col, padx=(12, 6), sticky='w')
+            self._reg(label, key)
+            entry = ctk.CTkEntry(settings, width=65, textvariable=variable)
+            entry.grid(row=1, column=col + 1, padx=(0, 12), sticky='w')
+            setattr(self, key + '_entry', entry)
+        self.check_serpentine = ctk.CTkCheckBox(settings, text='', variable=self.serpentine, command=self._on_inputs_changed)
+        self.check_serpentine.grid(row=2, column=0, columnspan=2, padx=12, pady=10, sticky='w')
+        self._reg(self.check_serpentine, 'serpentine')
+        self.check_rtl = ctk.CTkCheckBox(settings, text='', variable=self.first_rtl, command=self._on_inputs_changed)
+        self.check_rtl.grid(row=2, column=2, columnspan=2, padx=12, pady=10, sticky='w')
+        self._reg(self.check_rtl, 'first_rtl')
+        hint = ctk.CTkLabel(files, text='', text_color='gray70')
+        hint.grid(row=1, column=0, sticky='w')
+        self._reg(hint, 'order_hint')
+        list_frame = ctk.CTkFrame(files)
+        list_frame.grid(row=2, column=0, sticky='nsew', pady=(4, 6))
+        list_frame.grid_rowconfigure(0, weight=1)
+        list_frame.grid_columnconfigure(0, weight=1)
+        self.file_list = tk.Listbox(list_frame, bg='#242424', fg='#eeeeee',
+                                   selectbackground='#1f6aa5', selectforeground='white',
+                                   font=('TkDefaultFont', 12), height=5, exportselection=False,
+                                   relief='flat', highlightthickness=0)
+        self.file_list.grid(row=0, column=0, sticky='nsew', padx=6, pady=6)
+        scrollbar = ctk.CTkScrollbar(list_frame, command=self.file_list.yview)
+        scrollbar.grid(row=0, column=1, sticky='ns')
+        self.file_list.configure(yscrollcommand=scrollbar.set)
+        self.file_list.bind('<<ListboxSelect>>', lambda event: self._render_state())
+        reorder = ctk.CTkFrame(files, fg_color='transparent')
+        reorder.grid(row=3, column=0, sticky='ew', pady=(0, 6))
+        self._order_buttons = []
+        for key, command in (
+            ('btn_up', lambda: self._move_file(-1)), ('btn_down', lambda: self._move_file(1)),
+            ('btn_reverse', self._reverse_files), ('btn_sort', self._sort_files),
+        ):
+            button = ctk.CTkButton(reorder, text='', width=75, command=command)
+            button.pack(side='left', padx=(0, 6))
+            self._reg(button, key)
+            self._order_buttons.append(button)
+        self.lbl_layout_hint = ctk.CTkLabel(files, text='', text_color='gray70')
+        self.lbl_layout_hint.grid(row=4, column=0, sticky='w')
+        self._reg(self.lbl_layout_hint, 'layout_hint')
+        self.layout_text = ctk.CTkTextbox(files, height=85, font=ctk.CTkFont(size=13), wrap='none')
+        self.layout_text.grid(row=5, column=0, sticky='ew', pady=4)
+        self.lbl_validation = ctk.CTkLabel(files, text='', text_color='#ff8b80', wraplength=520)
+        self.lbl_validation.grid(row=6, column=0, sticky='w')
+        logs.grid_rowconfigure(0, weight=1)
+        logs.grid_columnconfigure(0, weight=1)
+        self.log_text = ctk.CTkTextbox(logs, font=ctk.CTkFont(size=12), wrap='word')
+        self.log_text.grid(row=0, column=0, sticky='nsew')
 
-        lang_options = ["English", "简体中文", "日本語"]
-        lang_default = {"en": "English", "zh-Hans": "简体中文", "ja": "日本語"}[self.lang]
-        self.lang_menu = ctk.CTkOptionMenu(
-            lang_frame, values=lang_options,
-            command=self._set_lang,
-            font=ctk.CTkFont(size=12), width=110,
-        )
-        self.lang_menu.set(lang_default)
-        self.lang_menu.pack(side="left")
-
-        # ===== 左侧面板 =====
-        left_frame = ctk.CTkFrame(self)
-        left_frame.grid(row=0, column=0, padx=(15, 7), pady=15, sticky="nsew")
-        left_frame.grid_columnconfigure(0, weight=1)
-        left_frame.grid_rowconfigure(0, weight=0)
-        left_frame.grid_rowconfigure(1, weight=1)
-        left_frame.grid_rowconfigure(2, weight=0)
-
-        # --- 顶部：文件选择 ---
-        file_frame = ctk.CTkFrame(left_frame)
-        file_frame.grid(row=0, column=0, padx=12, pady=(12, 0), sticky="ew")
-        file_frame.grid_columnconfigure(0, weight=1)
-
-        lbl_heading = ctk.CTkLabel(
-            file_frame, text="",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        )
-        lbl_heading.grid(row=0, column=0, padx=15, pady=(15, 5), sticky="w")
-        self._reg(lbl_heading, "heading")
-
-        lbl_sub = ctk.CTkLabel(
-            file_frame, text="",
-            font=ctk.CTkFont(size=12), text_color="gray70",
-        )
-        lbl_sub.grid(row=1, column=0, padx=15, pady=(0, 5), sticky="w")
-        self._reg(lbl_sub, "subtitle")
-
-        btn_bar = ctk.CTkFrame(file_frame, fg_color="transparent")
-        btn_bar.grid(row=2, column=0, padx=15, pady=(5, 15), sticky="ew")
-
-        self.btn_select = ctk.CTkButton(
-            btn_bar, text="",
-            command=self._on_select_files,
-            height=36, font=ctk.CTkFont(size=13),
-        )
-        self.btn_select.pack(side="left", padx=(0, 8))
-        self._reg(self.btn_select, "btn_select")
-
-        self.lbl_count = ctk.CTkLabel(
-            btn_bar, text="",
-            font=ctk.CTkFont(size=12), text_color="gray60",
-        )
-        self.lbl_count.pack(side="left", padx=8)
-
-        # --- 中间：日志区 ---
-        log_frame = ctk.CTkFrame(left_frame)
-        log_frame.grid(row=1, column=0, padx=12, pady=(8, 0), sticky="nsew")
-        log_frame.grid_columnconfigure(0, weight=1)
-        log_frame.grid_rowconfigure(0, weight=0)
-        log_frame.grid_rowconfigure(1, weight=1)
-
-        lbl_log = ctk.CTkLabel(
-            log_frame, text="",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        )
-        lbl_log.grid(row=0, column=0, padx=12, pady=(10, 5), sticky="w")
-        self._reg(lbl_log, "log_title")
-
-        self.log_text = ctk.CTkTextbox(
-            log_frame,
-            font=ctk.CTkFont(family="Menlo", size=11),
-            wrap="word", activate_scrollbars=True,
-        )
-        self.log_text.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
-
-        # --- 底部：按钮 ---
-        bottom_frame = ctk.CTkFrame(left_frame, fg_color="transparent")
-        bottom_frame.grid(row=2, column=0, padx=12, pady=(8, 12), sticky="ew")
-
-        self.btn_start = ctk.CTkButton(
-            bottom_frame, text="",
-            command=self._on_start,
-            height=44,
-            font=ctk.CTkFont(size=15, weight="bold"),
-            state="disabled",
-        )
-        self.btn_start.pack(fill="x")
-        self._reg(self.btn_start, "btn_start")
-
-        self.progress_bar = ctk.CTkProgressBar(bottom_frame)
-        self.progress_bar.pack(fill="x", pady=(8, 0))
+        bottom = ctk.CTkFrame(left, fg_color='transparent')
+        bottom.grid(row=3, column=0, sticky='ew', padx=15, pady=(0, 15))
+        bottom.grid_columnconfigure(0, weight=1)
+        self.lbl_status = ctk.CTkLabel(bottom, text='', anchor='w')
+        self.lbl_status.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 5))
+        self.btn_start = ctk.CTkButton(bottom, text='', height=40, command=self._on_start)
+        self.btn_start.grid(row=1, column=0, sticky='ew', padx=(0, 8))
+        self.btn_cancel = ctk.CTkButton(bottom, text='', height=40, width=110, command=self._on_cancel,
+                                       fg_color='#555555', hover_color='#666666')
+        self.btn_cancel.grid(row=1, column=1)
+        self.progress_bar = ctk.CTkProgressBar(bottom, mode='indeterminate')
+        self.progress_bar.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(10, 0))
         self.progress_bar.set(0)
-        self.progress_bar.configure(mode="indeterminate")
 
-        # ===== 右侧面板：预览 =====
-        right_frame = ctk.CTkFrame(self)
-        right_frame.grid(row=0, column=1, padx=(7, 15), pady=(50, 15), sticky="nsew")
-        right_frame.grid_columnconfigure(0, weight=1)
-        right_frame.grid_rowconfigure(0, weight=0)
-        right_frame.grid_rowconfigure(1, weight=1)
-        right_frame.grid_rowconfigure(2, weight=0)
-        right_frame.grid_rowconfigure(3, weight=0)
+        right = ctk.CTkFrame(self)
+        right.grid(row=0, column=1, padx=(7, 15), pady=15, sticky='nsew')
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(2, weight=1)
+        language = ctk.CTkFrame(right, fg_color='transparent')
+        language.grid(row=0, column=0, sticky='e', padx=12, pady=12)
+        label = ctk.CTkLabel(language, text='')
+        label.pack(side='left', padx=(0, 8))
+        self._reg(label, 'lang_label')
+        self.lang_menu = ctk.CTkOptionMenu(language, values=['English', '简体中文', '日本語'],
+                                          width=110, command=self._set_lang)
+        self.lang_menu.set({'en': 'English', 'zh-Hans': '简体中文', 'ja': '日本語'}[self.lang])
+        self.lang_menu.pack(side='left')
+        label = ctk.CTkLabel(right, text='', font=ctk.CTkFont(size=14, weight='bold'))
+        label.grid(row=1, column=0, sticky='w', padx=15, pady=(0, 8))
+        self._reg(label, 'preview_title')
+        # CTkLabel.configure(image=None) does not clear the underlying Tk image.
+        # Keep a real, transparent placeholder so releasing a completed preview
+        # cannot leave Tk referencing a deleted PhotoImage on the next run.
+        self._empty_preview = ctk.CTkImage(Image.new('RGBA', (1, 1)), size=(1, 1))
+        self.preview_label = ctk.CTkLabel(right, text='', image=self._empty_preview, width=300, height=250,
+                                          fg_color='gray15', corner_radius=8, text_color='gray60')
+        self.preview_label.grid(row=2, column=0, sticky='nsew', padx=12)
+        self.preview_label.bind('<Configure>', self._on_preview_resize)
+        self.lbl_size = ctk.CTkLabel(right, text='')
+        self.lbl_size.grid(row=3, column=0, sticky='w', padx=15, pady=8)
+        self.btn_export = ctk.CTkButton(right, text='', height=38, command=self._on_export)
+        self.btn_export.grid(row=4, column=0, sticky='ew', padx=12, pady=(0, 15))
+        self._reg(self.btn_export, 'btn_export')
 
-        lbl_preview = ctk.CTkLabel(
-            right_frame, text="",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        )
-        lbl_preview.grid(row=0, column=0, padx=12, pady=(12, 5), sticky="w")
-        self._reg(lbl_preview, "preview_title")
+    def _get_request(self):
+        if not self.use_grid.get():
+            return StitchRequest(tuple(self.image_paths))
+        try:
+            rows, cols = int(self.rows.get()), int(self.cols.get())
+            if rows < 1 or cols < 1:
+                raise ValueError
+        except ValueError as error:
+            raise ValueError(self.t('grid_positive')) from error
+        if rows * cols != len(self.image_paths):
+            raise ValueError(self.t('grid_count', expected=rows * cols, actual=len(self.image_paths)))
+        return StitchRequest(tuple(self.image_paths), (rows, cols), self.serpentine.get(), self.first_rtl.get())
 
-        self.preview_label = ctk.CTkLabel(
-            right_frame, text="",
-            font=ctk.CTkFont(size=12), text_color="gray50",
-            width=300, height=300,
-            fg_color="gray15", corner_radius=8,
-        )
-        self.preview_label.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="nsew")
-        self._reg(self.preview_label, "preview_placeholder")
+    def _refresh_layout(self):
+        self.lbl_count.configure(text=self.t('lbl_count', n=len(self.image_paths)) if self.image_paths else self.t('lbl_none'))
+        error = ''
+        self._layout_valid = False
+        if len(self.image_paths) < 2:
+            text = self.t('layout_empty')
+        else:
+            try:
+                request = self._get_request()
+                self._layout_valid = True
+                if request.grid_shape is None:
+                    text = self.t('layout_auto')
+                    if self._layout_notice:
+                        text += '\n\n' + self.t('layout_grid_reset')
+                else:
+                    lines = []
+                    for indices in request.layout_indices():
+                        arrow = ' ← ' if len(indices) > 1 and indices[0] > indices[-1] else ' → '
+                        lines.append(arrow.join(f'{index + 1:02d}' for index in indices))
+                    text = '\n'.join(lines)
+            except ValueError as exc:
+                text, error = '—', str(exc)
+        self.layout_text.configure(state='normal')
+        self.layout_text.delete('1.0', 'end')
+        self.layout_text.insert('end', text)
+        self.layout_text.configure(state='disabled')
+        self.lbl_validation.configure(text=error)
 
-        self.btn_export = ctk.CTkButton(
-            right_frame, text="",
-            command=self._on_export,
-            height=36, font=ctk.CTkFont(size=13),
-            state="disabled",
-        )
-        self.btn_export.grid(row=2, column=0, padx=12, pady=(0, 15), sticky="ew")
-        self._reg(self.btn_export, "btn_export")
+    def _render_state(self):
+        busy = self.task.busy
+        self.btn_select.configure(state='disabled' if busy else 'normal')
+        self.grid_switch.configure(state='disabled' if busy else 'normal')
+        grid_state = 'normal' if self.use_grid.get() and not busy else 'disabled'
+        for widget in (self.rows_entry, self.cols_entry, self.check_serpentine, self.check_rtl):
+            widget.configure(state=grid_state)
+        self.btn_start.configure(state='normal' if self._layout_valid and not busy else 'disabled',
+                                 text=self.t('btn_start_disabled' if busy else 'btn_start'))
+        self.btn_cancel.configure(state='normal' if self.task.state == TaskState.RUNNING else 'disabled',
+                                  text=self.t('btn_cancelling' if self.task.state == TaskState.CANCELLING else 'btn_cancel'))
+        self.btn_export.configure(state='normal' if self.task.state == TaskState.SUCCEEDED else 'disabled')
+        self.file_list.configure(state='disabled' if busy else 'normal')
+        selection = self.file_list.curselection()
+        for index, button in enumerate(self._order_buttons):
+            enabled = not busy and len(self.image_paths) > 1
+            if index < 2:
+                enabled = enabled and bool(selection) and 0 <= selection[0] + (-1 if index == 0 else 1) < len(self.image_paths)
+            button.configure(state='normal' if enabled else 'disabled')
+        color = {TaskState.FAILED: '#ff8b80', TaskState.SUCCEEDED: '#8bd5a0',
+                 TaskState.CANCELLED: '#f4c57a', TaskState.CANCELLING: '#f4c57a'}.get(self.task.state, 'gray75')
+        self.lbl_status.configure(text=self.t('status_' + self.task.state.value), text_color=color)
 
-        self.lbl_size = ctk.CTkLabel(
-            right_frame, text="",
-            font=ctk.CTkFont(size=11), text_color="gray60",
-        )
-        self.lbl_size.grid(row=3, column=0, padx=12, pady=(0, 8), sticky="w")
+    def _clear_preview(self):
+        if self._preview_id is not None:
+            self.after_cancel(self._preview_id)
+            self._preview_id = None
+        self.preview_label.configure(image=self._empty_preview, text=self.t('preview_placeholder'))
+        self.preview_label.image = None
+        self.lbl_size.configure(text='')
 
-    # ================================================================
-    # 文件选择
-    # ================================================================
-    def _on_select_files(self):
-        paths = filedialog.askopenfilenames(
-            title=self.t("dialog_select"),
-            filetypes=[
-                (self.t("file_filter_tiff"), "*.tif *.tiff"),
-                (self.t("file_filter_all"), "*.*"),
-            ],
-        )
-        if not paths:
+    def _on_inputs_changed(self, *args):
+        if self.task.busy:
             return
-        self._load_files(list(paths))
+        self.task.reset(has_inputs=len(self.image_paths) >= 2)
+        self._layout_notice = False
+        self.progress_bar.stop()
+        self.progress_bar.set(0)
+        self._clear_preview()
+        self._refresh_layout()
+        self._render_state()
+
+    def _on_select_files(self):
+        if self.task.busy:
+            return
+        paths = filedialog.askopenfilenames(title=self.t('dialog_select'), filetypes=[
+            (self.t('file_filter_tiff'), '*.tif *.tiff'), (self.t('file_filter_all'), '*.*')])
+        if paths:
+            self._load_files(list(paths))
 
     def _load_files(self, paths):
-        def _sort_key(p):
-            name = os.path.basename(p)
-            nums = re.findall(r"\d+", name)
-            if nums:
-                return (0, int(nums[-1]), name)
-            return (1, 0, name)
-
-        paths = sorted(paths, key=_sort_key)
+        if self.task.busy:
+            return
         if len(paths) < 2:
-            messagebox.showwarning(
-                self.t("msg_few"),
-                self.t("msg_few_detail", n=len(paths)),
-            )
+            messagebox.showwarning(self.t('msg_few'), self.t('msg_few_detail', n=len(paths)))
             return
-        self.image_paths = paths
-        self.lbl_count.configure(text=self.t("lbl_count", n=len(paths)))
-        self.btn_start.configure(state="normal")
-        self._append_log(self.t("log_loaded", n=len(paths)))
-        for p in paths:
-            self._append_log(f"  - {os.path.basename(p)}")
+        previous_count = len(self.image_paths)
+        self.image_paths = natural_sort(paths)
+        reset_grid = False
+        if previous_count and previous_count != len(paths) and self.use_grid.get():
+            try:
+                self._get_request()
+            except ValueError:
+                self.use_grid.set(False)
+                reset_grid = True
+        self._refresh_file_list()
+        self._on_inputs_changed()
+        if reset_grid:
+            self._layout_notice = True
+            self._refresh_layout()
+            self._append_log(self.t('layout_grid_reset'))
+        self.tabs.set(self._tab_names['tab_files'])
 
-    # ================================================================
-    # 日志
-    # ================================================================
-    def _append_log(self, msg: str):
-        self.log_text.insert("end", msg + "\n")
-        self.log_text.see("end")
-        self.update_idletasks()
+    def _refresh_file_list(self, selected=None):
+        self.file_list.delete(0, 'end')
+        for index, path in enumerate(self.image_paths):
+            self.file_list.insert('end', f'{index + 1:02d}  {os.path.basename(path)}')
+        if selected is not None:
+            self.file_list.selection_set(selected)
+            self.file_list.see(selected)
 
-    # ================================================================
-    # 开始拼接
-    # ================================================================
+    def _move_file(self, delta):
+        if self.task.busy:
+            return
+        selection = self.file_list.curselection()
+        if not selection:
+            return
+        index, target = selection[0], selection[0] + delta
+        if 0 <= target < len(self.image_paths):
+            self.image_paths[index], self.image_paths[target] = self.image_paths[target], self.image_paths[index]
+            self._refresh_file_list(target)
+            self._on_inputs_changed()
+
+    def _reverse_files(self):
+        if not self.task.busy:
+            self.image_paths.reverse()
+            self._refresh_file_list()
+            self._on_inputs_changed()
+
+    def _sort_files(self):
+        if not self.task.busy:
+            self.image_paths = natural_sort(self.image_paths)
+            self._refresh_file_list()
+            self._on_inputs_changed()
+
+    def _append_log(self, message):
+        self.log_text.insert('end', message + '\n')
+        self.log_text.see('end')
+
     def _on_start(self):
-        if self.is_running:
+        if self.task.busy:
             return
-        self.is_running = True
-        self.btn_start.configure(state="disabled", text=self.t("btn_start_disabled"))
-        self.btn_select.configure(state="disabled")
-        self.progress_bar.start()
-        self.log_text.delete("1.0", "end")
-        self._append_log("=" * 50)
-        self._append_log(self.t("log_start"))
-
-        self.stitcher_thread = threading.Thread(
-            target=self._run_stitching, daemon=True
-        )
-        self.stitcher_thread.start()
-        self._poll_thread()
-
-    def _run_stitching(self):
         try:
-            stitcher = SEMStitcher()
-            stitcher.set_progress_callback(self._log_from_thread)
-            result = stitcher.stitch_sequence(self.image_paths)
-            self.stitched_result = result
-        except Exception as e:
-            import traceback
-            self._log_from_thread(self.t("log_error", e=e))
-            self._log_from_thread(traceback.format_exc())
-            self.stitched_result = None
+            request = self._get_request()
+        except ValueError as error:
+            messagebox.showwarning(self.t('msg_settings'), str(error))
+            return
+        self._clear_preview()
+        self.log_text.delete('1.0', 'end')
+        self._append_log(self.t('log_start'))
+        self._append_log(self.t('log_loaded', n=len(request.paths)))
+        for index, path in enumerate(request.paths):
+            self._append_log(f'  {index + 1:02d}  {os.path.basename(path)}')
+        self.tabs.set(self._tab_names['tab_log'])
+        try:
+            self.task.start(request)
+        except Exception as error:
+            self._append_log(self.t('log_error', e=error))
+            self._render_state()
+            return
+        self.progress_bar.set(0)
+        self.progress_bar.start()
+        self._render_state()
+        self._poll_task()
 
-    def _log_from_thread(self, msg: str):
-        self.after(0, self._append_log, msg)
+    def _on_cancel(self):
+        if self.task.state == TaskState.RUNNING:
+            self.task.cancel()
+            self._append_log(self.t('log_cancelling'))
+            self._render_state()
 
-    def _poll_thread(self):
-        if self.stitcher_thread and self.stitcher_thread.is_alive():
-            self.after(200, self._poll_thread)
-        else:
-            self._on_stitching_done()
-
-    def _on_stitching_done(self):
-        self.is_running = False
+    def _poll_task(self):
+        self._poll_id = None
+        if self._closing:
+            return
+        for message in self.task.poll():
+            self._append_log(message)
+        if self.task.busy:
+            self._poll_id = self.after(75, self._poll_task)
+            return
         self.progress_bar.stop()
-        self.progress_bar.set(1)
-        self.btn_select.configure(state="normal")
-        self.btn_start.configure(state="normal")
-        self._apply_language()  # restore button text
-
-        if self.stitched_result is not None:
+        self.progress_bar.set(1 if self.task.state == TaskState.SUCCEEDED else 0)
+        self._render_state()
+        if self.task.state == TaskState.SUCCEEDED:
+            self._append_log(self.t('log_done'))
             h, w = self.stitched_result.shape
-            self._append_log(self.t("log_done"))
-            self._append_log(f"  {self.t('lbl_size', w=w, h=h)}")
-            self.lbl_size.configure(text=self.t("lbl_size", w=w, h=h))
-            self.btn_export.configure(state="normal")
+            self.lbl_size.configure(text=self.t('lbl_size', w=w, h=h))
             self._update_preview()
-        else:
-            self._append_log(self.t("log_fail"))
-            self.progress_bar.set(0)
+        elif self.task.state == TaskState.CANCELLED:
+            self._append_log(self.t('log_cancelled'))
+            self._clear_preview()
+        elif self.task.state == TaskState.FAILED:
+            self._append_log(self.task.error or self.t('log_fail'))
+            self._append_log(self.t('log_fail'))
+            self._clear_preview()
+
+    def _on_close(self):
+        self._closing = True
+        self.task.cancel()
+        for timer in (self._poll_id, self._preview_id):
+            if timer is not None:
+                self.after_cancel(timer)
+        self.destroy()
+
+    def _on_preview_resize(self, event):
+        if self.stitched_result is not None and not self._closing:
+            if self._preview_id is not None:
+                self.after_cancel(self._preview_id)
+            self._preview_id = self.after(120, self._update_preview)
 
     # ================================================================
     # 预览
     # ================================================================
     def _update_preview(self):
-        if self.stitched_result is None:
+        self._preview_id = None
+        if self._closing or self.stitched_result is None:
             return
         # Normalize only the display copy; keep the full 16-bit result for export.
         img_arr = SEMStitcher._matching_image(self.stitched_result)
         h, w = img_arr.shape
-        scale = min(PREVIEW_MAX / max(w, h), 1.0)
+        available_w = max(1, self.preview_label.winfo_width() - 24)
+        available_h = max(1, self.preview_label.winfo_height() - 24)
+        scale = min(available_w / w, available_h / h, PREVIEW_MAX / max(w, h), 1.0)
         new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
         from cv2 import resize, INTER_AREA
         resized = resize(img_arr, (new_w, new_h), interpolation=INTER_AREA)
@@ -476,7 +633,7 @@ class SEMStitcherGUI(ctk.CTk):
     # 导出
     # ================================================================
     def _on_export(self):
-        if self.stitched_result is None:
+        if self.task.state != TaskState.SUCCEEDED or self.stitched_result is None:
             return
         path = filedialog.asksaveasfilename(
             title=self.t("dialog_export"),
