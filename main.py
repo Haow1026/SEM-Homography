@@ -580,6 +580,84 @@ class SEMStitcher:
             residuals.append((float(np.hypot(error_x, error_y)), edge))
         return residuals
 
+    def _solve_consistent_graph(self, n, edges, root, residual_threshold, labels):
+        """Recover one erroneous constraint only if its exclusion is unique.
+
+        An erroneous edge can spread its error onto several good edges in the
+        least-squares fit. Test each single-edge exclusion against *all* other
+        edges, preserving connectivity, rather than dropping all large residuals.
+        Multiple feasible exclusions are ambiguous and require inspection; a
+        spanning tree alone cannot independently validate its translations.
+        """
+        self._check_cancelled()
+        solution = self._solve_global_positions(n, edges, root)
+        x, y, _, _, rank_x, rank_y, matrix_shape = solution
+        if rank_x != n or rank_y != n:
+            raise RuntimeError(
+                f"Global positioning is rank-deficient (rank X={rank_x}, Y={rank_y})."
+            )
+        self._log(f"  Matrix: {matrix_shape[0]} eqns x {matrix_shape[1]} unknowns")
+        residuals = self._edge_residuals(edges, x, y)
+        worst = max(error for error, _ in residuals)
+        self._log(
+            f"  Pass 1: worst edge residual={worst:.2f} px "
+            f"(threshold={residual_threshold:.2f} px)"
+        )
+        if worst <= residual_threshold:
+            return edges, solution
+
+        self._log(
+            f"  Checking {len(edges)} single-edge exclusions; "
+            "all images must remain connected"
+        )
+        candidates = []
+        for index, excluded in enumerate(edges):
+            self._check_cancelled()
+            retained = edges[:index] + edges[index + 1:]
+            if len(self._connected_order(n, retained, root)) != n:
+                continue  # Never remove a bridge and lose an image.
+            trial = self._solve_global_positions(n, retained, root)
+            self._check_cancelled()
+            tx, ty, _, _, rank_x, rank_y, _ = trial
+            if rank_x != n or rank_y != n:
+                continue
+            remaining_worst = max(error for error, _ in self._edge_residuals(retained, tx, ty))
+            excluded_error = self._edge_residuals([excluded], tx, ty)[0][0]
+            if remaining_worst <= residual_threshold and excluded_error > residual_threshold:
+                candidates.append((excluded, retained, trial, remaining_worst, excluded_error))
+
+        if len(candidates) != 1:
+            if candidates:
+                pairs = ", ".join(f"{labels[e[1]]} ↔ {labels[e[2]]}" for e, *_ in candidates)
+                reason = f"Ambiguous exclusions ({len(candidates)}): {pairs}."
+            else:
+                pairs = ", ".join(
+                    f"{labels[e[1]]} ↔ {labels[e[2]]} ({error:.2f} px)"
+                    for error, e in sorted(residuals, key=lambda item: item[0], reverse=True)[:3]
+                )
+                reason = f"No single-edge exclusion restores consistency. Largest residuals: {pairs}."
+            raise RuntimeError(
+                f"Inconsistent image matches: worst residual {worst:.2f} px "
+                f"exceeds {residual_threshold:.2f} px. {reason} "
+                "Inspect overlap, scan order and the indicated image pairs."
+            )
+
+        excluded, retained, solution, remaining_worst, excluded_error = candidates[0]
+        _, i, j, dx, dy = excluded
+        x, y = solution[:2]
+        self._log(
+            f"  Exclude [{i}↔{j}] {labels[i]} ↔ {labels[j]}: "
+            f"measured=({dx:.2f}, {dy:.2f}) px, "
+            f"predicted=({x[i] - x[j]:.2f}, {y[i] - y[j]:.2f}) px, "
+            f"disagreement={excluded_error:.2f} px"
+        )
+        self._log(
+            f"  Recovered: {len(retained)} edges connect all {n} images; "
+            f"worst retained residual={remaining_worst:.2f} px "
+            f"(threshold={residual_threshold:.2f} px)"
+        )
+        return retained, solution
+
     def stitch_sequence(
         self,
         image_paths: list,
@@ -678,60 +756,20 @@ class SEMStitcher:
                 "Reliable matches do not connect every image. Missing: " + ", ".join(missing)
             )
 
-        # ---- Phase 2: weighted least squares and one robust outlier-pruning pass ----
+        # ---- Phase 2: connected global fit and unambiguous edge recovery ----
         self._log(f"\n--- Phase 2: Weighted least squares ({len(edges)} edges) ---")
-        for pass_index in range(2):
-            self._check_cancelled()
-            root, degree = self._select_anchor(n, edges)
-            (
-                global_x, global_y, residual_x, residual_y,
-                rank_x, rank_y, matrix_shape,
-            ) = self._solve_global_positions(n, edges, root)
-
-            if rank_x != n or rank_y != n:
-                raise RuntimeError(
-                    f"Global positioning is rank-deficient (rank X={rank_x}, Y={rank_y})."
-                )
-
-            if pass_index == 0:
-                self._log(
-                    f"  Anchor: [{root}] {os.path.basename(image_paths[root])} "
-                    f"(degree={degree[root]})"
-                )
-                self._log(f"  Matrix: {matrix_shape[0]} eqns x {matrix_shape[1]} unknowns")
-
-            edge_residuals = self._edge_residuals(edges, global_x, global_y)
-            worst_residual = max(residual for residual, _ in edge_residuals)
-            self._log(
-                f"  Pass {pass_index + 1}: worst edge residual={worst_residual:.2f} px "
-                f"(threshold={residual_threshold:.2f} px)"
-            )
-            outliers = [edge for residual, edge in edge_residuals if residual > residual_threshold]
-            if not outliers or pass_index == 1:
-                break
-
-            retained_edges = [edge for edge in edges if edge not in outliers]
-            retained_order = self._connected_order(n, retained_edges, root)
-            if len(retained_order) != n:
-                self._log("  Keep residual outliers: removing them would disconnect the image graph")
-                break
-
-            self._log(f"  Pruning {len(outliers)} inconsistent edge(s) and solving again:")
-            for residual, edge in edge_residuals:
-                if edge in outliers:
-                    _, i, j, _, _ = edge
-                    self._log(
-                        f"    drop [{i}↔{j}] {os.path.basename(image_paths[i])} ↔ "
-                        f"{os.path.basename(image_paths[j])}: residual={residual:.2f} px"
-                    )
-            edges = retained_edges
-
-        if worst_residual > residual_threshold:
-            raise RuntimeError(
-                f"Inconsistent image matches: worst residual {worst_residual:.2f} px "
-                f"exceeds {residual_threshold:.2f} px. Check overlap, scan order, "
-                "and grid settings before exporting a panorama."
-            )
+        self._log(
+            f"  Anchor: [{root}] {os.path.basename(image_paths[root])} "
+            f"(degree={degree[root]})"
+        )
+        edges, solution = self._solve_consistent_graph(
+            n, edges, root, residual_threshold,
+            [os.path.basename(path) for path in image_paths],
+        )
+        (
+            global_x, global_y, residual_x, residual_y,
+            rank_x, rank_y, matrix_shape,
+        ) = solution
 
         residual_x_text = f"X residual={residual_x[0]:.1f}" if len(residual_x) > 0 else "X determined"
         residual_y_text = f"Y residual={residual_y[0]:.1f}" if len(residual_y) > 0 else "Y determined"
