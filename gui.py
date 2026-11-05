@@ -16,6 +16,9 @@ import numpy as np
 from main import SEMStitcher
 from stitching_task import StitchRequest, StitchTask, TaskState, natural_sort
 from inspector import SeamInspector
+from project import restore_project, save_project
+from project_job import ProjectJob
+from image_io import write_image
 
 # ============================================================
 # 多语言翻译表  i18n
@@ -177,6 +180,34 @@ LANG['ja'].update({
     'btn_inspect': '継ぎ目 / 原寸を確認',
 })
 
+LANG['en'].update({
+    'btn_project_open': 'Open project', 'btn_project_save': 'Save project',
+    'project_filter': 'SEM project', 'project_open': 'Open SEM project', 'project_save': 'Save SEM project',
+    'status_project_open': 'Verifying sources and restoring project…',
+    'status_project_save': 'Verifying sources and saving project…',
+    'project_saved': 'Project saved: {path}', 'project_restored': 'Project restored: {path}',
+    'project_inputs': 'Saved inputs restored. Start stitching to create a panorama.',
+    'project_cancelled': 'Project operation cancelled; current session kept.',
+})
+LANG['zh-Hans'].update({
+    'btn_project_open': '打开项目', 'btn_project_save': '保存项目',
+    'project_filter': 'SEM 项目', 'project_open': '打开 SEM 项目', 'project_save': '保存 SEM 项目',
+    'status_project_open': '正在校验源图并恢复项目…', 'status_project_save': '正在校验源图并保存项目…',
+    'project_saved': '项目已保存：{path}', 'project_restored': '项目已恢复：{path}',
+    'project_inputs': '已恢复文件与布局，点击开始拼接生成全景图。',
+    'project_cancelled': '项目操作已取消，保留当前会话。',
+})
+LANG['ja'].update({
+    'btn_project_open': 'プロジェクトを開く', 'btn_project_save': 'プロジェクト保存',
+    'project_filter': 'SEM プロジェクト', 'project_open': 'SEM プロジェクトを開く',
+    'project_save': 'SEM プロジェクトを保存',
+    'status_project_open': '元画像を検証してプロジェクトを復元中…',
+    'status_project_save': '元画像を検証してプロジェクトを保存中…',
+    'project_saved': 'プロジェクトを保存しました：{path}', 'project_restored': 'プロジェクトを復元しました：{path}',
+    'project_inputs': 'ファイルと配置を復元しました。開始ボタンで全景画像を作成してください。',
+    'project_cancelled': 'プロジェクト操作をキャンセルしました。現在の状態を保持します。',
+})
+
 # ============================================================
 # 全局配置
 # ============================================================
@@ -211,6 +242,8 @@ class SEMStitcherGUI(ctk.CTk):
         self.minsize(1050, 700)
         self.image_paths = []
         self.task = StitchTask()
+        self.project_job = ProjectJob()
+        self._applying_project = False
         self._closing = False
         self._poll_id = None
         self._preview_id = None
@@ -232,6 +265,10 @@ class SEMStitcherGUI(ctk.CTk):
     @property
     def stitched_result(self):
         return self.task.result
+
+    @property
+    def _busy(self):
+        return self.task.busy or self.project_job.busy
 
     def t(self, key, **fmt):
         return LANG[self.lang].get(key, key).format(**fmt)
@@ -278,9 +315,15 @@ class SEMStitcherGUI(ctk.CTk):
         subtitle = ctk.CTkLabel(header, text='', text_color='gray70')
         subtitle.pack(anchor='w', pady=(0, 8))
         self._reg(subtitle, 'subtitle')
-        self.btn_select = ctk.CTkButton(header, text='', command=self._on_select_files)
+        self.btn_select = ctk.CTkButton(header, text='', width=130, command=self._on_select_files)
         self.btn_select.pack(side='left')
         self._reg(self.btn_select, 'btn_select')
+        self.btn_project_open = ctk.CTkButton(header, text='', width=105, command=self._on_open_project)
+        self.btn_project_open.pack(side='left', padx=(6, 0))
+        self._reg(self.btn_project_open, 'btn_project_open')
+        self.btn_project_save = ctk.CTkButton(header, text='', width=105, command=self._on_save_project)
+        self.btn_project_save.pack(side='left', padx=(6, 0))
+        self._reg(self.btn_project_save, 'btn_project_save')
         self.lbl_count = ctk.CTkLabel(header, text='')
         self.lbl_count.pack(side='left', padx=12)
 
@@ -437,18 +480,21 @@ class SEMStitcherGUI(ctk.CTk):
         self.lbl_validation.configure(text=error)
 
     def _render_state(self):
-        busy = self.task.busy
+        busy = self._busy
         self.btn_select.configure(state='disabled' if busy else 'normal')
+        self.btn_project_open.configure(state='disabled' if busy else 'normal')
+        self.btn_project_save.configure(state='normal' if self._layout_valid and not busy else 'disabled')
         self.grid_switch.configure(state='disabled' if busy else 'normal')
         grid_state = 'normal' if self.use_grid.get() and not busy else 'disabled'
         for widget in (self.rows_entry, self.cols_entry, self.check_serpentine, self.check_rtl):
             widget.configure(state=grid_state)
         self.btn_start.configure(state='normal' if self._layout_valid and not busy else 'disabled',
-                                 text=self.t('btn_start_disabled' if busy else 'btn_start'))
-        self.btn_cancel.configure(state='normal' if self.task.state == TaskState.RUNNING else 'disabled',
-                                  text=self.t('btn_cancelling' if self.task.state == TaskState.CANCELLING else 'btn_cancel'))
-        self.btn_export.configure(state='normal' if self.task.state == TaskState.SUCCEEDED else 'disabled')
-        self.btn_inspect.configure(state='normal' if self.task.state == TaskState.SUCCEEDED
+                                 text=self.t('btn_start_disabled' if self.task.busy else 'btn_start'))
+        state = self.project_job.state if self.project_job.busy else self.task.state
+        self.btn_cancel.configure(state='normal' if state == TaskState.RUNNING else 'disabled',
+                                  text=self.t('btn_cancelling' if state == TaskState.CANCELLING else 'btn_cancel'))
+        self.btn_export.configure(state='normal' if self.task.state == TaskState.SUCCEEDED and not busy else 'disabled')
+        self.btn_inspect.configure(state='normal' if self.task.state == TaskState.SUCCEEDED and not busy
                                   and self.task.inspection is not None else 'disabled')
         self.file_list.configure(state='disabled' if busy else 'normal')
         selection = self.file_list.curselection()
@@ -458,8 +504,10 @@ class SEMStitcherGUI(ctk.CTk):
                 enabled = enabled and bool(selection) and 0 <= selection[0] + (-1 if index == 0 else 1) < len(self.image_paths)
             button.configure(state='normal' if enabled else 'disabled')
         color = {TaskState.FAILED: '#ff8b80', TaskState.SUCCEEDED: '#8bd5a0',
-                 TaskState.CANCELLED: '#f4c57a', TaskState.CANCELLING: '#f4c57a'}.get(self.task.state, 'gray75')
-        self.lbl_status.configure(text=self.t('status_' + self.task.state.value), text_color=color)
+                 TaskState.CANCELLED: '#f4c57a', TaskState.CANCELLING: '#f4c57a'}.get(state, 'gray75')
+        status_key = ('status_project_' + self.project_job.kind if self.project_job.state == TaskState.RUNNING
+                      else 'status_' + state.value)
+        self.lbl_status.configure(text=self.t(status_key), text_color=color)
 
     def _clear_preview(self):
         if self._inspector is not None:
@@ -473,7 +521,7 @@ class SEMStitcherGUI(ctk.CTk):
         self.lbl_size.configure(text='')
 
     def _on_inputs_changed(self, *args):
-        if self.task.busy:
+        if self._busy or self._applying_project:
             return
         self.task.reset(has_inputs=len(self.image_paths) >= 2)
         self._layout_notice = False
@@ -484,7 +532,7 @@ class SEMStitcherGUI(ctk.CTk):
         self._render_state()
 
     def _on_select_files(self):
-        if self.task.busy:
+        if self._busy:
             return
         paths = filedialog.askopenfilenames(title=self.t('dialog_select'), filetypes=[
             (self.t('file_filter_tiff'), '*.tif *.tiff'), (self.t('file_filter_all'), '*.*')])
@@ -492,7 +540,7 @@ class SEMStitcherGUI(ctk.CTk):
             self._load_files(list(paths))
 
     def _load_files(self, paths):
-        if self.task.busy:
+        if self._busy:
             return
         if len(paths) < 2:
             messagebox.showwarning(self.t('msg_few'), self.t('msg_few_detail', n=len(paths)))
@@ -523,7 +571,7 @@ class SEMStitcherGUI(ctk.CTk):
             self.file_list.see(selected)
 
     def _move_file(self, delta):
-        if self.task.busy:
+        if self._busy:
             return
         selection = self.file_list.curselection()
         if not selection:
@@ -535,13 +583,13 @@ class SEMStitcherGUI(ctk.CTk):
             self._on_inputs_changed()
 
     def _reverse_files(self):
-        if not self.task.busy:
+        if not self._busy:
             self.image_paths.reverse()
             self._refresh_file_list()
             self._on_inputs_changed()
 
     def _sort_files(self):
-        if not self.task.busy:
+        if not self._busy:
             self.image_paths = natural_sort(self.image_paths)
             self._refresh_file_list()
             self._on_inputs_changed()
@@ -551,7 +599,7 @@ class SEMStitcherGUI(ctk.CTk):
         self.log_text.see('end')
 
     def _on_start(self):
-        if self.task.busy:
+        if self._busy:
             return
         try:
             request = self._get_request()
@@ -577,10 +625,108 @@ class SEMStitcherGUI(ctk.CTk):
         self._poll_task()
 
     def _on_cancel(self):
-        if self.task.state == TaskState.RUNNING:
-            self.task.cancel()
+        active = self.project_job if self.project_job.busy else self.task
+        if active.state == TaskState.RUNNING:
+            active.cancel()
             self._append_log(self.t('log_cancelling'))
             self._render_state()
+
+    def _on_save_project(self):
+        if self._busy:
+            return
+        try:
+            request = self._get_request()
+        except ValueError as error:
+            messagebox.showwarning(self.t('msg_settings'), str(error))
+            return
+        path = filedialog.asksaveasfilename(title=self.t('project_save'), defaultextension='.semproj',
+                                           filetypes=[(self.t('project_filter'), '*.semproj')],
+                                           initialfile='stitch.semproj')
+        if not path:
+            return
+        inspection = self.task.inspection if self.task.state == TaskState.SUCCEEDED else None
+        panorama = self.stitched_result if inspection is not None else None
+        self._start_project_job('save', path, lambda cancel, log: save_project(
+            path, request, inspection, panorama, cancelled=cancel, log=log))
+
+    def _on_open_project(self):
+        if self._busy:
+            return
+        path = filedialog.askopenfilename(title=self.t('project_open'), filetypes=[
+            (self.t('project_filter'), '*.semproj'), (self.t('file_filter_all'), '*.*')])
+        if path:
+            self._start_project_job('open', path, lambda cancel, log: restore_project(path, cancel, log))
+
+    def _start_project_job(self, kind, path, operation):
+        self._project_path = path
+        self.tabs.set(self._tab_names['tab_log'])
+        self._append_log(self.t('status_project_' + kind))
+        try:
+            self.project_job.start(kind, operation)
+        except Exception as error:
+            self._append_log(self.t('log_error', e=error))
+            self._render_state()
+            return
+        self.progress_bar.start()
+        self._render_state()
+        self._poll_project_job()
+
+    def _poll_project_job(self):
+        self._poll_id = None
+        if self._closing:
+            return
+        for message in self.project_job.poll():
+            self._append_log(message)
+        if self.project_job.busy:
+            self._poll_id = self.after(75, self._poll_project_job)
+            return
+        self.progress_bar.stop()
+        if self.project_job.state == TaskState.SUCCEEDED:
+            if self.project_job.kind == 'open':
+                self._apply_project(self.project_job.result)
+                self._append_log(self.t('project_restored', path=self._project_path))
+                if self.stitched_result is None:
+                    self._append_log(self.t('project_inputs'))
+            else:
+                self._append_log(self.t('project_saved', path=self.project_job.result))
+        elif self.project_job.state == TaskState.CANCELLED:
+            self._append_log(self.t('project_cancelled'))
+        else:
+            error = self.project_job.error or self.t('log_fail')
+            self._append_log(error)
+            messagebox.showerror(self.t('project_' + self.project_job.kind), error.rstrip().splitlines()[-1])
+        self.project_job.result = None
+        self.progress_bar.set(1 if self.task.state == TaskState.SUCCEEDED else 0)
+        self._render_state()
+
+    def _apply_project(self, restored):
+        # Apply once on the Tk owner, preserving acquisition order exactly.
+        self._clear_preview()
+        request = restored.request
+        self._applying_project = True
+        try:
+            self.image_paths = list(request.paths)
+            self.use_grid.set(request.grid_shape is not None)
+            if request.grid_shape is not None:
+                self.rows.set(str(request.grid_shape[0]))
+                self.cols.set(str(request.grid_shape[1]))
+            self.serpentine.set(request.serpentine)
+            self.first_rtl.set(request.first_row_rtl)
+        finally:
+            self._applying_project = False
+        self.task.reset(has_inputs=True)
+        if restored.panorama is not None:
+            self.task.request = request
+            self.task.result = restored.panorama
+            self.task.inspection = restored.inspection
+            self.task.metrics = restored.metrics
+            self.task.state = TaskState.SUCCEEDED
+            h, w = restored.panorama.shape
+            self.lbl_size.configure(text=self.t('lbl_size', w=w, h=h))
+            self._update_preview()
+        self._layout_notice = False
+        self._refresh_file_list()
+        self._refresh_layout()
 
     def _poll_task(self):
         self._poll_id = None
@@ -612,6 +758,7 @@ class SEMStitcherGUI(ctk.CTk):
         if self._inspector is not None:
             self._inspector.close()
         self.task.cancel()
+        self.project_job.close()
         for timer in (self._poll_id, self._preview_id):
             if timer is not None:
                 self.after_cancel(timer)
@@ -627,7 +774,7 @@ class SEMStitcherGUI(ctk.CTk):
     # 预览
     # ================================================================
     def _on_inspect(self):
-        if self.task.state != TaskState.SUCCEEDED or self.task.inspection is None:
+        if self._busy or self.task.state != TaskState.SUCCEEDED or self.task.inspection is None:
             return
         if self._inspector is not None and not self._inspector.closed:
             self._inspector.lift()
@@ -658,7 +805,7 @@ class SEMStitcherGUI(ctk.CTk):
     # 导出
     # ================================================================
     def _on_export(self):
-        if self.task.state != TaskState.SUCCEEDED or self.stitched_result is None:
+        if self._busy or self.task.state != TaskState.SUCCEEDED or self.stitched_result is None:
             return
         path = filedialog.asksaveasfilename(
             title=self.t("dialog_export"),
@@ -672,12 +819,11 @@ class SEMStitcherGUI(ctk.CTk):
         )
         if not path:
             return
-        from cv2 import imwrite
         try:
             if (self.stitched_result.dtype == np.uint16
                     and os.path.splitext(path)[1].lower() not in (".tif", ".tiff", ".png")):
                 raise ValueError("16-bit images must be exported as TIFF or PNG")
-            if not imwrite(path, self.stitched_result):
+            if not write_image(path, self.stitched_result):
                 raise OSError(f"Cannot write image: {path}")
         except Exception as error:
             message = self.t("log_error", e=error)
