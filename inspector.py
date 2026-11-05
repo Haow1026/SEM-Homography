@@ -9,6 +9,7 @@ from PIL import Image, ImageTk
 import numpy as np
 
 from inspection import Viewport, display_gray, display_range, pair_frame, sample_view
+import ui_theme as theme
 
 
 TEXT = {
@@ -42,6 +43,7 @@ def _load_pair(report, index, generation, events):
 class SeamInspector(ctk.CTkToplevel):
     def __init__(self, parent, panorama, report, lang='en'):
         super().__init__(parent)
+        self.configure(fg_color=theme.BACKGROUND)
         self.report = report
         self.panorama = panorama
         self.lang = lang
@@ -82,7 +84,7 @@ class SeamInspector(ctk.CTkToplevel):
         self.zoom_label.pack(side='left', padx=5)
         self.info_label = ctk.CTkLabel(self, text='', anchor='w', justify='left', wraplength=1000)
         self.info_label.grid(row=2, column=0, sticky='ew', padx=12, pady=6)
-        self.canvas = tk.Canvas(self, bg='#151515', highlightthickness=0)
+        self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
         self.canvas.grid(row=3, column=0, sticky='nsew', padx=12)
         footer = ctk.CTkFrame(self, fg_color='transparent')
         footer.grid(row=4, column=0, sticky='ew', padx=12, pady=(8, 12))
@@ -135,7 +137,7 @@ class SeamInspector(ctk.CTkToplevel):
             text += self.t('info', status=self.t('excluded' if p.excluded else 'retained'),
                            inliers=p.inliers, residual=p.residual, mx=p.measured[0], my=p.measured[1],
                            px=p.predicted[0], py=p.predicted[1])
-        color = '#ff8b80' if self._error or (self._pair is not None and self._pair.excluded) else 'gray80'
+        color = theme.ERROR if self._error or (self._pair is not None and self._pair.excluded) else theme.TEXT
         self.info_label.configure(text=text, text_color=color)
 
     def _choose_label(self, label):
