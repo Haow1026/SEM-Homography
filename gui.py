@@ -1,24 +1,27 @@
 """
 SEM Image Stitching Tool — Mac Desktop GUI
 ===========================================
-CustomTkinter dark-mode interface: file selection, real-time log,
+CustomTkinter image workbench: file selection, real-time log,
 async stitching, preview & export.  Supports en / 简体中文 / 日本語.
 """
 
 import os
 import locale
+import sys
 import tkinter as tk
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from PIL import Image
+from workbench import build_workbench, button_style
 import numpy as np
 
-from main import SEMStitcher
 from stitching_task import StitchRequest, StitchTask, TaskState, natural_sort
 from inspector import SeamInspector
 from project import restore_project, save_project
 from project_job import ProjectJob
 from image_io import write_image
+from inspection import display_gray, display_range
+import ui_theme as theme
 
 # ============================================================
 # 多语言翻译表  i18n
@@ -208,14 +211,40 @@ LANG['ja'].update({
     'project_cancelled': 'プロジェクト操作をキャンセルしました。現在の状態を保持します。',
 })
 
+LANG['en'].update({
+    'heading': 'SEM Stitch', 'btn_restart': 'Stitch again', 'preview_title': 'Panorama',
+    'files_title': 'Source images', 'scan_title': 'Scan layout', 'theme_label': 'Appearance',
+    'theme_system': 'System', 'theme_light': 'Light', 'theme_dark': 'Dark',
+    'project_untitled': 'Untitled project', 'project_modified': 'Modified',
+    'fit_hint': 'Fit to window', 'lbl_size_depth': '{w} × {h} · {bits}-bit',
+    'order_hint': 'Files are listed in acquisition order.', 'layout_hint': 'Numbers = file list order.',
+})
+LANG['zh-Hans'].update({
+    'heading': 'SEM 图像拼接', 'btn_start': '开始拼接', 'btn_restart': '重新拼接',
+    'btn_export': '导出全景图', 'btn_inspect': '接缝检查 / 原分辨率', 'preview_title': '全景预览',
+    'files_title': '原始图像', 'scan_title': '扫描布局', 'theme_label': '外观',
+    'theme_system': '跟随系统', 'theme_light': '浅色', 'theme_dark': '深色',
+    'project_untitled': '未命名项目', 'project_modified': '已修改',
+    'fit_hint': '自动适应窗口', 'lbl_size_depth': '{w} × {h} · {bits} 位',
+    'order_hint': '文件按采集顺序排列。', 'layout_hint': '编号对应文件列表顺序。',
+})
+LANG['ja'].update({
+    'title': 'SEM 画像ステッチ', 'heading': 'SEM 画像ステッチ',
+    'btn_start': 'ステッチ開始', 'btn_restart': '再ステッチ', 'btn_export': '全景を書き出し',
+    'preview_title': '全景プレビュー', 'files_title': '元画像', 'scan_title': 'スキャン配置',
+    'theme_label': '外観', 'theme_system': 'システム', 'theme_light': 'ライト', 'theme_dark': 'ダーク',
+    'project_untitled': '名称未設定', 'project_modified': '変更あり',
+    'fit_hint': 'ウィンドウに合わせる', 'lbl_size_depth': '{w} × {h} · {bits} ビット',
+    'order_hint': 'ファイルは取得順に表示します。', 'layout_hint': '番号はファイル一覧の順序です。',
+})
+
 # ============================================================
 # 全局配置
 # ============================================================
-ctk.set_appearance_mode("dark")
+ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("blue")
 
-WIN_WIDTH, WIN_HEIGHT = 1180, 760
-PREVIEW_MAX = 700
+WIN_WIDTH, WIN_HEIGHT = 1240, 820
 
 
 def _detect_lang():
@@ -238,6 +267,12 @@ class SEMStitcherGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.lang = _detect_lang()
+        self.theme_mode = 'System'
+        self._session_path = None
+        self._project_dirty = False
+        self._log_open = False
+        self._layout_open = True
+        self._preview_key = self._preview_limits = None
         self.geometry(f"{WIN_WIDTH}x{WIN_HEIGHT}")
         self.minsize(1050, 700)
         self.image_paths = []
@@ -260,7 +295,12 @@ class SEMStitcherGUI(ctk.CTk):
         self.rows.trace_add('write', self._on_inputs_changed)
         self.cols.trace_add('write', self._on_inputs_changed)
         self.protocol('WM_DELETE_WINDOW', self._on_close)
+        self.bind('<Configure>', self._on_window_resize, add='+')
         self._apply_language()
+        self._set_theme_mode('System')
+        shortcut = 'Command' if sys.platform == 'darwin' else 'Control'
+        self.bind('<' + shortcut + '-o>', lambda event: self._on_open_project())
+        self.bind('<' + shortcut + '-s>', lambda event: self._on_save_project())
 
     @property
     def stitched_result(self):
@@ -278,13 +318,13 @@ class SEMStitcherGUI(ctk.CTk):
 
     def _apply_language(self):
         self.title(self.t('title'))
+        self.lang_menu.set({'en': 'English', 'zh-Hans': '简体中文', 'ja': '日本語'}[self.lang])
         for widget, (key, fmt) in self._i18n_widgets.items():
             widget.configure(text=self.t(key, **fmt))
-        for key, old_name in list(self._tab_names.items()):
-            new_name = self.t(key)
-            if old_name != new_name:
-                self.tabs.rename(old_name, new_name)
-                self._tab_names[key] = new_name
+        self.theme_menu.configure(values=[self.t('theme_' + mode.lower()) for mode in ('System', 'Light', 'Dark')])
+        self.theme_menu.set(self.t('theme_' + self.theme_mode.lower()))
+        self._refresh_section_labels()
+        self._refresh_session()
         self._refresh_layout()
         self._render_state()
         if self._inspector is not None and not self._inspector.closed:
@@ -292,151 +332,88 @@ class SEMStitcherGUI(ctk.CTk):
         if self.stitched_result is None:
             self.preview_label.configure(text=self.t('preview_placeholder'))
         else:
-            h, w = self.stitched_result.shape
-            self.lbl_size.configure(text=self.t('lbl_size', w=w, h=h))
+            self._update_result_metadata()
 
     def _set_lang(self, choice):
         self.lang = {'English': 'en', '简体中文': 'zh-Hans', '日本語': 'ja'}[choice]
         self._apply_language()
 
+    def _set_theme(self, choice):
+        mode = next(mode for mode in ('System', 'Light', 'Dark')
+                    if choice == self.t('theme_' + mode.lower()))
+        self._set_theme_mode(mode)
+
+    def _set_theme_mode(self, mode):
+        self.theme_mode = mode
+        ctk.set_appearance_mode(mode)
+        if mode == 'System':
+            ctk.AppearanceModeTracker.init_appearance_mode()
+        self.theme_menu.set(self.t('theme_' + mode.lower()))
+        self._sync_native_palette(ctk.get_appearance_mode())
+
+    def _set_appearance_mode(self, mode):
+        super()._set_appearance_mode(mode)
+        if hasattr(self, 'file_list') and not self._closing:
+            self._sync_native_palette(mode)
+
+    def _sync_native_palette(self, mode):
+        color = lambda pair: theme.native_color(pair, mode)
+        self.file_list.configure(bg=color(theme.SURFACE), fg=color(theme.TEXT),
+                                 selectbackground=color(theme.PRIMARY), selectforeground=color(theme.PRIMARY_TEXT),
+                                 disabledforeground=color(theme.MUTED), highlightbackground=color(theme.BORDER),
+                                 highlightcolor=color(theme.PRIMARY),
+                                 font=self._font_body.create_scaled_tuple(ctk.ScalingTracker.get_widget_scaling(self)))
+
+    def _refresh_session(self):
+        name = os.path.basename(self._session_path) if self._session_path else self.t('project_untitled')
+        shown = name if len(name) <= 24 else name[:21] + '…'
+        if self._project_dirty:
+            shown += ' · ' + self.t('project_modified')
+        self.lbl_session.configure(text=shown)
+        self.title(self.t('title') + (' — ' + name if self._session_path else ''))
+
+    def _refresh_section_labels(self):
+        self.btn_layout_toggle.configure(text=('▾ ' if self._layout_open else '▸ ') + self.t('scan_title'))
+        self.btn_log_toggle.configure(text=('▾ ' if self._log_open else '▸ ') + self.t('log_title'))
+
+    def _toggle_layout(self):
+        self._layout_open = not self._layout_open
+        if self._layout_open:
+            self.layout_panel.grid()
+        else:
+            self.layout_panel.grid_remove()
+        self._refresh_section_labels()
+
+    def _set_log_open(self, opened):
+        self._log_open = opened
+        self._fit_log_height()
+        if opened:
+            self.log_text.grid()
+            self.log_text.see('end')
+        else:
+            self.log_text.grid_remove()
+        self._refresh_section_labels()
+
+    def _toggle_log(self):
+        self._set_log_open(not self._log_open)
+
+    def _on_window_resize(self, event):
+        if event.widget is self and not self._closing:
+            self._fit_log_height()
+
+    def _fit_log_height(self):
+        logical_height = self.winfo_height() / ctk.ScalingTracker.get_window_scaling(self)
+        height = 120 if logical_height >= 780 else 48 if self.lbl_validation.cget('text') else 80
+        if self.log_text.cget('height') != height:
+            self.log_text.configure(height=height)
+
+    def _update_result_metadata(self):
+        h, w = self.stitched_result.shape
+        self.lbl_size.configure(text=self.t('lbl_size_depth', w=w, h=h,
+                                           bits=self.stitched_result.dtype.itemsize * 8))
+
     def _build_ui(self):
-        self.grid_columnconfigure(0, weight=3)
-        self.grid_columnconfigure(1, weight=2)
-        self.grid_rowconfigure(0, weight=1)
-        left = ctk.CTkFrame(self)
-        left.grid(row=0, column=0, padx=(15, 7), pady=15, sticky='nsew')
-        left.grid_columnconfigure(0, weight=1)
-        left.grid_rowconfigure(2, weight=1)
-        heading = ctk.CTkLabel(left, text='', font=ctk.CTkFont(size=20, weight='bold'))
-        heading.grid(row=0, column=0, padx=18, pady=(15, 0), sticky='w')
-        self._reg(heading, 'heading')
-        header = ctk.CTkFrame(left, fg_color='transparent')
-        header.grid(row=1, column=0, padx=15, pady=(5, 0), sticky='ew')
-        subtitle = ctk.CTkLabel(header, text='', text_color='gray70')
-        subtitle.pack(anchor='w', pady=(0, 8))
-        self._reg(subtitle, 'subtitle')
-        self.btn_select = ctk.CTkButton(header, text='', width=130, command=self._on_select_files)
-        self.btn_select.pack(side='left')
-        self._reg(self.btn_select, 'btn_select')
-        self.btn_project_open = ctk.CTkButton(header, text='', width=105, command=self._on_open_project)
-        self.btn_project_open.pack(side='left', padx=(6, 0))
-        self._reg(self.btn_project_open, 'btn_project_open')
-        self.btn_project_save = ctk.CTkButton(header, text='', width=105, command=self._on_save_project)
-        self.btn_project_save.pack(side='left', padx=(6, 0))
-        self._reg(self.btn_project_save, 'btn_project_save')
-        self.lbl_count = ctk.CTkLabel(header, text='')
-        self.lbl_count.pack(side='left', padx=12)
-
-        self.tabs = ctk.CTkTabview(left)
-        self.tabs.grid(row=2, column=0, padx=12, pady=8, sticky='nsew')
-        self._tab_names = {key: self.t(key) for key in ('tab_files', 'tab_log')}
-        files = self.tabs.add(self._tab_names['tab_files'])
-        logs = self.tabs.add(self._tab_names['tab_log'])
-        files.grid_columnconfigure(0, weight=1)
-        files.grid_rowconfigure(2, weight=1)
-        settings = ctk.CTkFrame(files)
-        settings.grid(row=0, column=0, sticky='ew', pady=(0, 8))
-        self.grid_switch = ctk.CTkSwitch(settings, text='', variable=self.use_grid, command=self._on_inputs_changed)
-        self.grid_switch.grid(row=0, column=0, columnspan=4, padx=12, pady=(10, 8), sticky='w')
-        self._reg(self.grid_switch, 'grid_enabled')
-        for col, key, variable in ((0, 'rows', self.rows), (2, 'cols', self.cols)):
-            label = ctk.CTkLabel(settings, text='')
-            label.grid(row=1, column=col, padx=(12, 6), sticky='w')
-            self._reg(label, key)
-            entry = ctk.CTkEntry(settings, width=65, textvariable=variable)
-            entry.grid(row=1, column=col + 1, padx=(0, 12), sticky='w')
-            setattr(self, key + '_entry', entry)
-        self.check_serpentine = ctk.CTkCheckBox(settings, text='', variable=self.serpentine, command=self._on_inputs_changed)
-        self.check_serpentine.grid(row=2, column=0, columnspan=2, padx=12, pady=10, sticky='w')
-        self._reg(self.check_serpentine, 'serpentine')
-        self.check_rtl = ctk.CTkCheckBox(settings, text='', variable=self.first_rtl, command=self._on_inputs_changed)
-        self.check_rtl.grid(row=2, column=2, columnspan=2, padx=12, pady=10, sticky='w')
-        self._reg(self.check_rtl, 'first_rtl')
-        hint = ctk.CTkLabel(files, text='', text_color='gray70')
-        hint.grid(row=1, column=0, sticky='w')
-        self._reg(hint, 'order_hint')
-        list_frame = ctk.CTkFrame(files)
-        list_frame.grid(row=2, column=0, sticky='nsew', pady=(4, 6))
-        list_frame.grid_rowconfigure(0, weight=1)
-        list_frame.grid_columnconfigure(0, weight=1)
-        self.file_list = tk.Listbox(list_frame, bg='#242424', fg='#eeeeee',
-                                   selectbackground='#1f6aa5', selectforeground='white',
-                                   font=('TkDefaultFont', 12), height=5, exportselection=False,
-                                   relief='flat', highlightthickness=0)
-        self.file_list.grid(row=0, column=0, sticky='nsew', padx=6, pady=6)
-        scrollbar = ctk.CTkScrollbar(list_frame, command=self.file_list.yview)
-        scrollbar.grid(row=0, column=1, sticky='ns')
-        self.file_list.configure(yscrollcommand=scrollbar.set)
-        self.file_list.bind('<<ListboxSelect>>', lambda event: self._render_state())
-        reorder = ctk.CTkFrame(files, fg_color='transparent')
-        reorder.grid(row=3, column=0, sticky='ew', pady=(0, 6))
-        self._order_buttons = []
-        for key, command in (
-            ('btn_up', lambda: self._move_file(-1)), ('btn_down', lambda: self._move_file(1)),
-            ('btn_reverse', self._reverse_files), ('btn_sort', self._sort_files),
-        ):
-            button = ctk.CTkButton(reorder, text='', width=75, command=command)
-            button.pack(side='left', padx=(0, 6))
-            self._reg(button, key)
-            self._order_buttons.append(button)
-        self.lbl_layout_hint = ctk.CTkLabel(files, text='', text_color='gray70')
-        self.lbl_layout_hint.grid(row=4, column=0, sticky='w')
-        self._reg(self.lbl_layout_hint, 'layout_hint')
-        self.layout_text = ctk.CTkTextbox(files, height=85, font=ctk.CTkFont(size=13), wrap='none')
-        self.layout_text.grid(row=5, column=0, sticky='ew', pady=4)
-        self.lbl_validation = ctk.CTkLabel(files, text='', text_color='#ff8b80', wraplength=520)
-        self.lbl_validation.grid(row=6, column=0, sticky='w')
-        logs.grid_rowconfigure(0, weight=1)
-        logs.grid_columnconfigure(0, weight=1)
-        self.log_text = ctk.CTkTextbox(logs, font=ctk.CTkFont(size=12), wrap='word')
-        self.log_text.grid(row=0, column=0, sticky='nsew')
-
-        bottom = ctk.CTkFrame(left, fg_color='transparent')
-        bottom.grid(row=3, column=0, sticky='ew', padx=15, pady=(0, 15))
-        bottom.grid_columnconfigure(0, weight=1)
-        self.lbl_status = ctk.CTkLabel(bottom, text='', anchor='w')
-        self.lbl_status.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 5))
-        self.btn_start = ctk.CTkButton(bottom, text='', height=40, command=self._on_start)
-        self.btn_start.grid(row=1, column=0, sticky='ew', padx=(0, 8))
-        self.btn_cancel = ctk.CTkButton(bottom, text='', height=40, width=110, command=self._on_cancel,
-                                       fg_color='#555555', hover_color='#666666')
-        self.btn_cancel.grid(row=1, column=1)
-        self.progress_bar = ctk.CTkProgressBar(bottom, mode='indeterminate')
-        self.progress_bar.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(10, 0))
-        self.progress_bar.set(0)
-
-        right = ctk.CTkFrame(self)
-        right.grid(row=0, column=1, padx=(7, 15), pady=15, sticky='nsew')
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(2, weight=1)
-        language = ctk.CTkFrame(right, fg_color='transparent')
-        language.grid(row=0, column=0, sticky='e', padx=12, pady=12)
-        label = ctk.CTkLabel(language, text='')
-        label.pack(side='left', padx=(0, 8))
-        self._reg(label, 'lang_label')
-        self.lang_menu = ctk.CTkOptionMenu(language, values=['English', '简体中文', '日本語'],
-                                          width=110, command=self._set_lang)
-        self.lang_menu.set({'en': 'English', 'zh-Hans': '简体中文', 'ja': '日本語'}[self.lang])
-        self.lang_menu.pack(side='left')
-        label = ctk.CTkLabel(right, text='', font=ctk.CTkFont(size=14, weight='bold'))
-        label.grid(row=1, column=0, sticky='w', padx=15, pady=(0, 8))
-        self._reg(label, 'preview_title')
-        # CTkLabel.configure(image=None) does not clear the underlying Tk image.
-        # Keep a real, transparent placeholder so releasing a completed preview
-        # cannot leave Tk referencing a deleted PhotoImage on the next run.
-        self._empty_preview = ctk.CTkImage(Image.new('RGBA', (1, 1)), size=(1, 1))
-        self.preview_label = ctk.CTkLabel(right, text='', image=self._empty_preview, width=300, height=250,
-                                          fg_color='gray15', corner_radius=8, text_color='gray60')
-        self.preview_label.grid(row=2, column=0, sticky='nsew', padx=12)
-        self.preview_label.bind('<Configure>', self._on_preview_resize)
-        self.lbl_size = ctk.CTkLabel(right, text='')
-        self.lbl_size.grid(row=3, column=0, sticky='w', padx=15, pady=8)
-        self.btn_inspect = ctk.CTkButton(right, text='', height=34, command=self._on_inspect)
-        self.btn_inspect.grid(row=4, column=0, sticky='ew', padx=12, pady=(0, 8))
-        self._reg(self.btn_inspect, 'btn_inspect')
-        self.btn_export = ctk.CTkButton(right, text='', height=38, command=self._on_export)
-        self.btn_export.grid(row=5, column=0, sticky='ew', padx=12, pady=(0, 15))
-        self._reg(self.btn_export, 'btn_export')
+        build_workbench(self)
 
     def _get_request(self):
         if not self.use_grid.get():
@@ -478,6 +455,11 @@ class SEMStitcherGUI(ctk.CTk):
         self.layout_text.insert('end', text)
         self.layout_text.configure(state='disabled')
         self.lbl_validation.configure(text=error)
+        if error:
+            self.lbl_validation.grid()
+        else:
+            self.lbl_validation.grid_remove()
+        self._fit_log_height()
 
     def _render_state(self):
         busy = self._busy
@@ -488,12 +470,16 @@ class SEMStitcherGUI(ctk.CTk):
         grid_state = 'normal' if self.use_grid.get() and not busy else 'disabled'
         for widget in (self.rows_entry, self.cols_entry, self.check_serpentine, self.check_rtl):
             widget.configure(state=grid_state)
+        succeeded = self.task.state == TaskState.SUCCEEDED
         self.btn_start.configure(state='normal' if self._layout_valid and not busy else 'disabled',
-                                 text=self.t('btn_start_disabled' if self.task.busy else 'btn_start'))
+                                 text=self.t('btn_start_disabled' if self.task.busy else
+                                             'btn_restart' if succeeded else 'btn_start'),
+                                 **button_style(not succeeded))
         state = self.project_job.state if self.project_job.busy else self.task.state
         self.btn_cancel.configure(state='normal' if state == TaskState.RUNNING else 'disabled',
                                   text=self.t('btn_cancelling' if state == TaskState.CANCELLING else 'btn_cancel'))
-        self.btn_export.configure(state='normal' if self.task.state == TaskState.SUCCEEDED and not busy else 'disabled')
+        self.btn_export.configure(state='normal' if succeeded and not busy else 'disabled',
+                                  **button_style(succeeded))
         self.btn_inspect.configure(state='normal' if self.task.state == TaskState.SUCCEEDED and not busy
                                   and self.task.inspection is not None else 'disabled')
         self.file_list.configure(state='disabled' if busy else 'normal')
@@ -503,8 +489,8 @@ class SEMStitcherGUI(ctk.CTk):
             if index < 2:
                 enabled = enabled and bool(selection) and 0 <= selection[0] + (-1 if index == 0 else 1) < len(self.image_paths)
             button.configure(state='normal' if enabled else 'disabled')
-        color = {TaskState.FAILED: '#ff8b80', TaskState.SUCCEEDED: '#8bd5a0',
-                 TaskState.CANCELLED: '#f4c57a', TaskState.CANCELLING: '#f4c57a'}.get(state, 'gray75')
+        color = {TaskState.FAILED: theme.ERROR, TaskState.SUCCEEDED: theme.SUCCESS,
+                 TaskState.CANCELLED: theme.WARNING, TaskState.CANCELLING: theme.WARNING}.get(state, theme.MUTED)
         status_key = ('status_project_' + self.project_job.kind if self.project_job.state == TaskState.RUNNING
                       else 'status_' + state.value)
         self.lbl_status.configure(text=self.t(status_key), text_color=color)
@@ -519,11 +505,14 @@ class SEMStitcherGUI(ctk.CTk):
         self.preview_label.configure(image=self._empty_preview, text=self.t('preview_placeholder'))
         self.preview_label.image = None
         self.lbl_size.configure(text='')
+        self._preview_key = self._preview_limits = None
 
     def _on_inputs_changed(self, *args):
         if self._busy or self._applying_project:
             return
         self.task.reset(has_inputs=len(self.image_paths) >= 2)
+        self._project_dirty = bool(self.image_paths)
+        self._refresh_session()
         self._layout_notice = False
         self.progress_bar.stop()
         self.progress_bar.set(0)
@@ -560,7 +549,6 @@ class SEMStitcherGUI(ctk.CTk):
             self._layout_notice = True
             self._refresh_layout()
             self._append_log(self.t('layout_grid_reset'))
-        self.tabs.set(self._tab_names['tab_files'])
 
     def _refresh_file_list(self, selected=None):
         self.file_list.delete(0, 'end')
@@ -607,15 +595,17 @@ class SEMStitcherGUI(ctk.CTk):
             messagebox.showwarning(self.t('msg_settings'), str(error))
             return
         self._clear_preview()
+        self._project_dirty = True
+        self._refresh_session()
         self.log_text.delete('1.0', 'end')
         self._append_log(self.t('log_start'))
         self._append_log(self.t('log_loaded', n=len(request.paths)))
         for index, path in enumerate(request.paths):
             self._append_log(f'  {index + 1:02d}  {os.path.basename(path)}')
-        self.tabs.set(self._tab_names['tab_log'])
         try:
             self.task.start(request)
         except Exception as error:
+            self._set_log_open(True)
             self._append_log(self.t('log_error', e=error))
             self._render_state()
             return
@@ -641,7 +631,8 @@ class SEMStitcherGUI(ctk.CTk):
             return
         path = filedialog.asksaveasfilename(title=self.t('project_save'), defaultextension='.semproj',
                                            filetypes=[(self.t('project_filter'), '*.semproj')],
-                                           initialfile='stitch.semproj')
+                                           initialfile=os.path.basename(self._session_path) if self._session_path else 'stitch.semproj',
+                                           **({'initialdir': os.path.dirname(self._session_path)} if self._session_path else {}))
         if not path:
             return
         inspection = self.task.inspection if self.task.state == TaskState.SUCCEEDED else None
@@ -659,11 +650,11 @@ class SEMStitcherGUI(ctk.CTk):
 
     def _start_project_job(self, kind, path, operation):
         self._project_path = path
-        self.tabs.set(self._tab_names['tab_log'])
         self._append_log(self.t('status_project_' + kind))
         try:
             self.project_job.start(kind, operation)
         except Exception as error:
+            self._set_log_open(True)
             self._append_log(self.t('log_error', e=error))
             self._render_state()
             return
@@ -684,14 +675,19 @@ class SEMStitcherGUI(ctk.CTk):
         if self.project_job.state == TaskState.SUCCEEDED:
             if self.project_job.kind == 'open':
                 self._apply_project(self.project_job.result)
+                self._session_path = os.path.abspath(self._project_path)
                 self._append_log(self.t('project_restored', path=self._project_path))
                 if self.stitched_result is None:
                     self._append_log(self.t('project_inputs'))
             else:
+                self._session_path = self.project_job.result
                 self._append_log(self.t('project_saved', path=self.project_job.result))
+            self._project_dirty = False
+            self._refresh_session()
         elif self.project_job.state == TaskState.CANCELLED:
             self._append_log(self.t('project_cancelled'))
         else:
+            self._set_log_open(True)
             error = self.project_job.error or self.t('log_fail')
             self._append_log(error)
             messagebox.showerror(self.t('project_' + self.project_job.kind), error.rstrip().splitlines()[-1])
@@ -721,8 +717,7 @@ class SEMStitcherGUI(ctk.CTk):
             self.task.inspection = restored.inspection
             self.task.metrics = restored.metrics
             self.task.state = TaskState.SUCCEEDED
-            h, w = restored.panorama.shape
-            self.lbl_size.configure(text=self.t('lbl_size', w=w, h=h))
+            self._update_result_metadata()
             self._update_preview()
         self._layout_notice = False
         self._refresh_file_list()
@@ -742,13 +737,13 @@ class SEMStitcherGUI(ctk.CTk):
         self._render_state()
         if self.task.state == TaskState.SUCCEEDED:
             self._append_log(self.t('log_done'))
-            h, w = self.stitched_result.shape
-            self.lbl_size.configure(text=self.t('lbl_size', w=w, h=h))
+            self._update_result_metadata()
             self._update_preview()
         elif self.task.state == TaskState.CANCELLED:
             self._append_log(self.t('log_cancelled'))
             self._clear_preview()
         elif self.task.state == TaskState.FAILED:
+            self._set_log_open(True)
             self._append_log(self.task.error or self.t('log_fail'))
             self._append_log(self.t('log_fail'))
             self._clear_preview()
@@ -785,15 +780,23 @@ class SEMStitcherGUI(ctk.CTk):
         self._preview_id = None
         if self._closing or self.stitched_result is None:
             return
-        # Normalize only the display copy; keep the full 16-bit result for export.
-        img_arr = SEMStitcher._matching_image(self.stitched_result)
-        h, w = img_arr.shape
+        # Resize the original bit depth first. Never allocate a full-panorama
+        # 8-bit display copy on each resize; cache its common display range.
+        source = self.stitched_result
+        key = (id(source), source.shape, source.dtype.str)
+        if key != self._preview_key:
+            self._preview_limits = display_range([source])
+            self._preview_key = key
+        h, w = source.shape
         available_w = max(1, self.preview_label.winfo_width() - 24)
         available_h = max(1, self.preview_label.winfo_height() - 24)
-        scale = min(available_w / w, available_h / h, PREVIEW_MAX / max(w, h), 1.0)
+        scale = min(available_w / w, available_h / h, 1.0)
         new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
         from cv2 import resize, INTER_AREA
-        resized = resize(img_arr, (new_w, new_h), interpolation=INTER_AREA)
+        resized = resize(source, (new_w, new_h), interpolation=INTER_AREA)
+        if source.dtype == np.uint16:
+            resized = display_gray(resized.astype(np.float32), np.ones(resized.shape, dtype=bool),
+                                   self._preview_limits)
         pil_img = Image.fromarray(resized)
         ctk_img = ctk.CTkImage(
             light_image=pil_img, dark_image=pil_img, size=(new_w, new_h)

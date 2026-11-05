@@ -81,6 +81,8 @@ class ProjectGUITests(unittest.TestCase):
         self.wait(lambda: not self.app._busy)
         self.assertEqual(self.app.project_job.state, TaskState.SUCCEEDED)
         self.assertIsNone(self.app.project_job.result)
+        self.assertFalse(self.app._project_dirty)
+        self.assertEqual(self.app._session_path, str(self.path))
 
     def test_ready_save_open_restores_manual_order_and_grid_without_enabling_export(self):
         self.app._load_files(self.paths)
@@ -177,6 +179,8 @@ class ProjectGUITests(unittest.TestCase):
         self.assertIs(self.app.stitched_result, original)
         self.assertEqual(self.app.btn_export.cget('state'), 'normal')
         self.assertEqual(self.app._get_request(), self.request)
+        self.assertEqual(self.app._session_path, str(self.path))
+        self.assertFalse(self.app._project_dirty)
         source.write_bytes(before)
         self.open_project()
         self.wait(lambda: not self.app._busy)
@@ -254,7 +258,8 @@ class ProjectGUITests(unittest.TestCase):
                 with self.subTest(lang=lang, widget=widget):
                     self.assertGreater(widget.winfo_width(), 1)
                     self.assertLessEqual(widget.winfo_x() + widget.winfo_width(), parent.winfo_width())
-            for left, right in zip(buttons, buttons[1:]):
+            actions = (self.app.btn_project_open, self.app.btn_project_save, self.app.btn_select)
+            for left, right in zip(actions, actions[1:]):
                 self.assertLessEqual(left.winfo_x() + left.winfo_width(), right.winfo_x())
 
 

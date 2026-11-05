@@ -19,6 +19,7 @@ A Mac desktop app for stitching Scanning Electron Microscope (SEM) images. Pure 
 - **原分辨率接缝检查**：支持 100%、缩放拖动、红青叠加、A/B 交替显示及已排除匹配标记
 - **项目保存与恢复**：保存采集顺序、网格、位移及匹配诊断；校验源图后恢复全景，跳过重新匹配
 - **中文路径支持**：Windows 下的拼接、项目恢复、接缝检查与 TIFF/PNG 导出均支持中文目录和文件名
+- **影像工作台**：窄文件栏与大尺寸全景预览，可折叠扫描设置与底部日志；支持跟随系统、浅色、深色主题
 - **多语言界面**：简体中文 / English / 日本語
 
 ---
@@ -45,10 +46,18 @@ python3 gui.py
 ```
 
 1. 点击 **选择图片文件**，多选要拼接的 TIFF 图像
-2. 在 **文件与布局** 核对采集顺序；默认按自然文件名排序（如 2 在 10 之前），可选中文件后上移/下移、倒序或恢复排序
+2. 在左侧 **原始图像** 核对采集顺序；默认按自然文件名排序（如 2 在 10 之前），可选中文件后上移/下移、倒序或恢复排序，长文件名可横向滚动
 3. 若已知扫描布局，打开 **使用已知网格**，输入行数、列数，并按实际采集方式设置 **蛇形扫描**、**首行从右向左**
 4. 核对编号布局：上方是首行，数字对应文件列表编号；不启用网格时使用自动匹配
-5. 点击 **开始拼接** 后自动切换至日志页；成功后预览结果，再点击 **导出全景图** 保存
+5. 点击 **开始拼接**，底部显示运行状态；可展开 **运行日志** 查看详情，失败时会自动展开。成功后查看全景预览，再点击 **导出全景图** 保存
+
+右上角可切换 **跟随系统 / 浅色 / 深色**，主题同时应用到文件列表和接缝检查窗口。
+左侧 **扫描布局** 与底部 **日志** 可折叠，以留出更多图像空间；最小窗口下日志会自动收缩高度。
+完成后主按钮突出 **导出全景图**，仍可点击 **重新拼接**，或选择下一批图片继续。
+顶栏显示当前项目名及 **已修改** 状态，`Cmd/Ctrl+O` 打开项目、`Cmd/Ctrl+S` 进入保存项目对话框。
+
+全景预览随窗口尺寸适配，不放大超过原图；16 位预览先缓存整幅图的显示范围，缩放后只对显示副本映射亮度。
+主题、折叠和预览缩放均不改变原始图像、拼接参数或导出位深。当前接缝检查仍在独立窗口中打开。
 
 界面区分准备就绪、拼接中、正在取消、已取消、失败、成功。开始新任务或修改文件/布局都会清除旧结果并禁用导出，
 只有当前任务成功后才能导出。行列值无效、网格尺寸与文件数量不符时不能启动。
@@ -174,6 +183,18 @@ python3 -m unittest discover -s tests -v
 GitHub Actions 在 Linux/Windows、Python 3.11/3.13 上运行；Linux 使用 `xvfb-run -a python3 -m unittest discover -s tests -v`
 运行界面测试。本机无图形显示时 Linux 会跳过界面测试；算法与任务控制测试仍会执行。
 
+可以用临时生成的 16 位合成图像预览真实工作台，不需要 SEM 数据：
+
+```bash
+python3 tools/preview_workbench.py --language zh-Hans --theme Dark
+python3 tools/preview_workbench.py --check
+# Linux / Xvfb：导出三语言、明暗主题、最小窗口和待拼接状态的 8 张截图
+xvfb-run -a -s "-screen 0 1600x1200x24" python3 tools/preview_workbench.py --output artifacts/workbench
+```
+
+演示源图仅在临时目录中存在，退出后删除；这组图像用于界面检查，不代表真实 SEM 对齐效果。
+Linux Python 3.13 的 CI 会上传 `workbench-ui-previews` 截图附件，供界面审查。
+
 ---
 
 ## 算法流程  Algorithm
@@ -200,14 +221,16 @@ GitHub Actions 在 Linux/Windows、Python 3.11/3.13 上运行；Linux 使用 `xv
 ```
 SEM Homography/
 ├── main.py              # 拼接算法核心 (SEMStitcher)
-├── gui.py               # GUI (CustomTkinter 深色模式)
+├── gui.py               # GUI 状态、交互与显示副本
+├── workbench.py         # 影像工作台布局
+├── ui_theme.py          # 明暗主题共享颜色
 ├── stitching_task.py    # 任务状态、取消、消息队列和扫描顺序映射
 ├── inspection.py        # 只读诊断报告、源图校验和视野取样
 ├── inspector.py         # 全景/重叠检查窗口
 ├── project.py           # 项目 JSON、源图指纹、原子保存与按位移恢复
 ├── project_job.py       # 可取消的后台项目读写，不访问 Tk
 ├── image_io.py          # 保留原位深的图像读写，兼容 Windows 中文路径
-├── tools/               # 可复现性能基准脚本
+├── tools/               # 可复现性能基准与原生界面预览脚本
 ├── benchmarks/          # 合成基准测量结果
 ├── tests/               # 合成数据回归测试
 ├── .github/workflows/   # 测试及 Windows 打包
