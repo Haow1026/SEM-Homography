@@ -8,11 +8,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-import cv2
 import numpy as np
 
 try:
     from gui import SEMStitcherGUI
+    from image_io import read_image, write_image
     from inspection import PairDiagnostic, StitchInspection, file_signature
     from main import SEMStitcher
     from project import RestoredProject, save_project
@@ -26,7 +26,8 @@ class ProjectGUITests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.folder = Path(self.directory.name).resolve()
+        self.folder = Path(self.directory.name).resolve() / '项目图像'
+        self.folder.mkdir()
         self.path = self.folder / 'project.semproj'
         self.app = SEMStitcherGUI()
         self.app.withdraw()
@@ -38,7 +39,7 @@ class ProjectGUITests(unittest.TestCase):
         self.paths = tuple(str(self.folder / name) for name in ('tile_10.tif', 'tile_2.tif'))
         images = [np.full((80, 90), value, np.uint16) for value in (40000, 42000)]
         for path, image in zip(self.paths, images):
-            self.assertTrue(cv2.imwrite(path, image))
+            self.assertTrue(write_image(path, image))
         stitcher = SEMStitcher()
         stitcher.set_progress_callback(lambda message: None)
         self.panorama = stitcher._compose_images(images, [(0, 0), (40.375, 0)])
@@ -121,7 +122,7 @@ class ProjectGUITests(unittest.TestCase):
         export = str(self.folder / 'export.tif')
         with patch('gui.filedialog.asksaveasfilename', return_value=export), patch('gui.messagebox.showinfo'):
             self.app.btn_export.invoke()
-        np.testing.assert_array_equal(cv2.imread(export, cv2.IMREAD_UNCHANGED), self.panorama)
+        np.testing.assert_array_equal(read_image(export), self.panorama)
         self.app._reverse_files()
         self.assertTrue(viewer.closed)
         self.assertIsNone(self.app.stitched_result)
@@ -132,7 +133,7 @@ class ProjectGUITests(unittest.TestCase):
         scene = texture(480).astype(np.uint16) * 257
         paths = tuple(str(self.folder / f'scan_{i}.tif') for i in range(4))
         for path, (x, y) in zip(paths, ((160, 0), (0, 0), (0, 160), (160, 160))):
-            self.assertTrue(cv2.imwrite(path, scene[y:y+320, x:x+320]))
+            self.assertTrue(write_image(path, scene[y:y+320, x:x+320]))
         self.app._load_files(paths)
         self.app.rows.set('2')
         self.app.cols.set('2')

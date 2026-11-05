@@ -18,6 +18,7 @@ A Mac desktop app for stitching Scanning Electron Microscope (SEM) images. Pure 
 - **16 位 TIFF**：特征提取使用 8 位工作副本，原始位深保留到融合和导出；预览归一化不影响导出数据
 - **原分辨率接缝检查**：支持 100%、缩放拖动、红青叠加、A/B 交替显示及已排除匹配标记
 - **项目保存与恢复**：保存采集顺序、网格、位移及匹配诊断；校验源图后恢复全景，跳过重新匹配
+- **中文路径支持**：Windows 下的拼接、项目恢复、接缝检查与 TIFF/PNG 导出均支持中文目录和文件名
 - **多语言界面**：简体中文 / English / 日本語
 
 ---
@@ -205,6 +206,7 @@ SEM Homography/
 ├── inspector.py         # 全景/重叠检查窗口
 ├── project.py           # 项目 JSON、源图指纹、原子保存与按位移恢复
 ├── project_job.py       # 可取消的后台项目读写，不访问 Tk
+├── image_io.py          # 保留原位深的图像读写，兼容 Windows 中文路径
 ├── tools/               # 可复现性能基准脚本
 ├── benchmarks/          # 合成基准测量结果
 ├── tests/               # 合成数据回归测试

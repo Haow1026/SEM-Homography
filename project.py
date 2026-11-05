@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 
 from inspection import PairDiagnostic, StitchInspection, canvas_geometry, file_signature
+from image_io import read_image
 from main import SEMStitcher, StitchingCancelled
 from stitching_task import StitchRequest
 
@@ -224,7 +225,7 @@ def restore_project(path, cancelled=lambda: False, log=lambda message: None):
         if before[0] != expected['size'] or _digest(path, cancelled) != expected['sha256']:
             raise ValueError(f'Source image changed: {path}')
         if alignment is not None:
-            image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            image = read_image(path)
             if (image is None or image.ndim != 2 or tuple(image.shape) != tuple(alignment['shapes'][index])
                     or str(image.dtype) != alignment['dtype']):
                 raise ValueError(f'Source image shape/bit depth does not match project: {path}')

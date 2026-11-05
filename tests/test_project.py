@@ -8,10 +8,10 @@ import threading
 import unittest
 from unittest.mock import patch
 
-import cv2
 import numpy as np
 
 from inspection import PairDiagnostic, StitchInspection, file_signature
+from image_io import write_image
 from main import SEMStitcher, StitchingCancelled
 from project import restore_project, save_project
 from stitching_task import StitchRequest
@@ -35,7 +35,7 @@ class ProjectTests(unittest.TestCase):
         rng = np.random.default_rng(91)
         images = [rng.integers(0, np.iinfo(dtype).max + 1, (80, 92), dtype=dtype) for _ in self.paths]
         for path, image in zip(self.paths, images):
-            self.assertTrue(cv2.imwrite(path, image))
+            self.assertTrue(write_image(path, image))
         positions = ((0.375, 0.625), (45.75, 0.625), (0.375, 39.875), (45.75, 39.875))
         self.result = self.stitcher._compose_images(images, positions)
         pairs = []
@@ -70,7 +70,7 @@ class ProjectTests(unittest.TestCase):
             for rtl in (False, True):
                 request = StitchRequest(self.paths, (2, 2), snake, rtl)
                 save_project(self.path, request)
-                with patch('project.cv2.imread', side_effect=AssertionError('ready projects need no decode')):
+                with patch('project.read_image', side_effect=AssertionError('ready projects need no decode')):
                     restored = restore_project(self.path)
                 self.assertEqual(restored.request, request)
                 self.assertEqual(restored.request.layout_indices(), request.layout_indices())
@@ -81,7 +81,7 @@ class ProjectTests(unittest.TestCase):
 
     def test_relative_bundle_can_move_and_timestamps_can_change_without_changing_pixels(self):
         self.save_completed()
-        document = json.loads(self.path.read_text())
+        document = json.loads(self.path.read_text(encoding='utf-8'))
         self.assertTrue(all(not Path(source['path']).is_absolute() for source in document['sources']))
         moved = Path(self.directory.name).resolve() / 'moved'
         shutil.copytree(self.bundle, moved)
@@ -112,7 +112,7 @@ class ProjectTests(unittest.TestCase):
             restore_project(self.path)
 
     def test_changed_source_cannot_be_saved_as_the_old_completed_result(self):
-        cv2.imwrite(self.paths[0], np.ones((80, 92), np.uint16))
+        write_image(self.paths[0], np.ones((80, 92), np.uint16))
         with self.assertRaisesRegex(ValueError, 'changed since stitching'):
             self.save_completed()
         self.assertFalse(self.path.exists())
@@ -183,7 +183,7 @@ class ProjectTests(unittest.TestCase):
 
     def test_malformed_metadata_is_rejected_before_source_decode(self):
         self.save_completed()
-        original = json.loads(self.path.read_text())
+        original = json.loads(self.path.read_text(encoding='utf-8'))
         mutations = [
             lambda d: d.update(version=2),
             lambda d: d.update(version=True),
@@ -203,14 +203,14 @@ class ProjectTests(unittest.TestCase):
             document = copy.deepcopy(original)
             mutation(document)
             self.path.write_text(json.dumps(document), encoding='utf-8')
-            with self.subTest(document=document), patch('project.cv2.imread') as read:
+            with self.subTest(document=document), patch('project.read_image') as read:
                 with self.assertRaises(ValueError):
                     restore_project(self.path)
                 read.assert_not_called()
 
     def test_output_pixel_mismatch_is_rejected(self):
         self.save_completed()
-        document = json.loads(self.path.read_text())
+        document = json.loads(self.path.read_text(encoding='utf-8'))
         document['alignment']['output']['sha256'] = '0'*64
         self.path.write_text(json.dumps(document), encoding='utf-8')
         with self.assertRaisesRegex(ValueError, 'pixels differ'):

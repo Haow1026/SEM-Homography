@@ -2,8 +2,9 @@
 from dataclasses import dataclass, replace
 import os
 
-import cv2
 import numpy as np
+
+from image_io import read_image
 
 
 def file_signature(path):
@@ -59,7 +60,7 @@ class StitchInspection:
                 raise FileNotFoundError(path)
             if self.signatures[tile] is not None and signature != self.signatures[tile]:
                 raise ValueError(f'Source image changed: {path}')
-            image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            image = read_image(path)
             if (image is None or image.ndim != 2 or image.shape != self.shapes[tile]
                     or image.dtype not in (np.uint8, np.uint16)):
                 raise ValueError(f'Cannot inspect source image: {path}')

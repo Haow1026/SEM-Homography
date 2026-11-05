@@ -15,6 +15,7 @@ import os
 import time
 
 from inspection import PairDiagnostic, StitchInspection, canvas_geometry, file_signature
+from image_io import read_image, write_image
 
 
 class StitchingCancelled(Exception):
@@ -782,7 +783,7 @@ class SEMStitcher:
         images, signatures = [], []
         for path in image_paths:
             self._check_cancelled()
-            img = cv2.imread(os.fspath(path), cv2.IMREAD_UNCHANGED)
+            img = read_image(path)
             if img is None:
                 raise FileNotFoundError(f"Cannot read image: {path}")
             images.append(img)
@@ -995,7 +996,7 @@ if __name__ == "__main__":
         residual_threshold=args.residual_threshold,
     )
 
-    if not cv2.imwrite(output_path, result):
+    if not write_image(output_path, result):
         raise RuntimeError(f"Failed to save result to: {output_path}")
     print(f"\nResult saved to: {output_path}")
 

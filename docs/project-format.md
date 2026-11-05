@@ -27,4 +27,6 @@ Saving writes and fsyncs a temporary file in the destination directory, checks c
 
 Project IO runs on a background worker with cancellation during streaming hashes and between blend blocks. Tk polls a queue and applies a restored session only after verification and worker exit. Failed/cancelled opens preserve the current session; a cancelled open discards queued success. No source arrays are retained by project metadata after restoration.
 
+On Windows, non-ASCII image paths use Python's Unicode file API and OpenCV's memory codecs. This shared path covers initial stitching, restoration, seam inspection and export, preserving uint8/uint16 TIFF/PNG data. The encoded source/destination buffer may add temporary memory during file IO.
+
 The original images and final panorama still reside in RAM during composition. An existing session is retained until a new project succeeds, so its panorama may coexist temporarily with the new one. This format does not supply missing-source relinking, embedded images, interrupted-computation checkpoints, or automatic overwrite on close; use explicit Save project and keep original files alongside the project.

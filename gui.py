@@ -18,6 +18,7 @@ from stitching_task import StitchRequest, StitchTask, TaskState, natural_sort
 from inspector import SeamInspector
 from project import restore_project, save_project
 from project_job import ProjectJob
+from image_io import write_image
 
 # ============================================================
 # 多语言翻译表  i18n
@@ -818,12 +819,11 @@ class SEMStitcherGUI(ctk.CTk):
         )
         if not path:
             return
-        from cv2 import imwrite
         try:
             if (self.stitched_result.dtype == np.uint16
                     and os.path.splitext(path)[1].lower() not in (".tif", ".tiff", ".png")):
                 raise ValueError("16-bit images must be exported as TIFF or PNG")
-            if not imwrite(path, self.stitched_result):
+            if not write_image(path, self.stitched_result):
                 raise OSError(f"Cannot write image: {path}")
         except Exception as error:
             message = self.t("log_error", e=error)
