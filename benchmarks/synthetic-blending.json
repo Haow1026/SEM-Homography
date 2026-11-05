@@ -1,0 +1,416 @@
+{
+  "dataset": "deterministic random grayscale, 3x3 grid, known fractional positions, 50% overlap",
+  "seed": 822,
+  "input_count": 9,
+  "repeats": 3,
+  "block_size": 1024,
+  "platform": "Darwin",
+  "architecture": "arm64",
+  "python": "3.13.13",
+  "opencv": "4.13.0",
+  "numpy": "2.4.4",
+  "opencv_threads": 1,
+  "cases": [
+    {
+      "tile_size": 1024,
+      "depth": 8,
+      "samples": {
+        "full": [
+          {
+            "seconds": 0.1266012080013752,
+            "peak_rss_bytes": 255541248,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint8",
+            "sha256": "338227ec8c8c1ea806c41708f0fb90eb4eae4ca31ac34af0ccc5d68e662ca844",
+            "input_bytes": 9437184,
+            "output_bytes": 4202500,
+            "accumulator_bytes": 67240000,
+            "blocks": null
+          },
+          {
+            "seconds": 0.14607229200191796,
+            "peak_rss_bytes": 255508480,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint8",
+            "sha256": "338227ec8c8c1ea806c41708f0fb90eb4eae4ca31ac34af0ccc5d68e662ca844",
+            "input_bytes": 9437184,
+            "output_bytes": 4202500,
+            "accumulator_bytes": 67240000,
+            "blocks": null
+          },
+          {
+            "seconds": 0.1379227499710396,
+            "peak_rss_bytes": 255393792,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint8",
+            "sha256": "338227ec8c8c1ea806c41708f0fb90eb4eae4ca31ac34af0ccc5d68e662ca844",
+            "input_bytes": 9437184,
+            "output_bytes": 4202500,
+            "accumulator_bytes": 67240000,
+            "blocks": null
+          }
+        ],
+        "blocked": [
+          {
+            "seconds": 0.11059029202442616,
+            "peak_rss_bytes": 141836288,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint8",
+            "sha256": "338227ec8c8c1ea806c41708f0fb90eb4eae4ca31ac34af0ccc5d68e662ca844",
+            "input_bytes": 9437184,
+            "output_bytes": 4202500,
+            "accumulator_bytes": 16777216,
+            "blocks": 9
+          },
+          {
+            "seconds": 0.11052008299157023,
+            "peak_rss_bytes": 141721600,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint8",
+            "sha256": "338227ec8c8c1ea806c41708f0fb90eb4eae4ca31ac34af0ccc5d68e662ca844",
+            "input_bytes": 9437184,
+            "output_bytes": 4202500,
+            "accumulator_bytes": 16777216,
+            "blocks": 9
+          },
+          {
+            "seconds": 0.09754733403678983,
+            "peak_rss_bytes": 141656064,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint8",
+            "sha256": "338227ec8c8c1ea806c41708f0fb90eb4eae4ca31ac34af0ccc5d68e662ca844",
+            "input_bytes": 9437184,
+            "output_bytes": 4202500,
+            "accumulator_bytes": 16777216,
+            "blocks": 9
+          }
+        ]
+      },
+      "identical_output_hashes": true,
+      "full_median_seconds": 0.1379227499710396,
+      "full_median_peak_rss_bytes": 255508480,
+      "blocked_median_seconds": 0.11052008299157023,
+      "blocked_median_peak_rss_bytes": 141721600,
+      "peak_rss_reduction_fraction": 0.4453350432831036
+    },
+    {
+      "tile_size": 1024,
+      "depth": 16,
+      "samples": {
+        "full": [
+          {
+            "seconds": 0.17184183292556554,
+            "peak_rss_bytes": 273481728,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint16",
+            "sha256": "157c49d49011439d9cd0e1837f2b73c4df08d24991a5c1402cf608818aea7f82",
+            "input_bytes": 18874368,
+            "output_bytes": 8405000,
+            "accumulator_bytes": 67240000,
+            "blocks": null
+          },
+          {
+            "seconds": 0.1524008329724893,
+            "peak_rss_bytes": 273416192,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint16",
+            "sha256": "157c49d49011439d9cd0e1837f2b73c4df08d24991a5c1402cf608818aea7f82",
+            "input_bytes": 18874368,
+            "output_bytes": 8405000,
+            "accumulator_bytes": 67240000,
+            "blocks": null
+          },
+          {
+            "seconds": 0.1292615419952199,
+            "peak_rss_bytes": 273547264,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint16",
+            "sha256": "157c49d49011439d9cd0e1837f2b73c4df08d24991a5c1402cf608818aea7f82",
+            "input_bytes": 18874368,
+            "output_bytes": 8405000,
+            "accumulator_bytes": 67240000,
+            "blocks": null
+          }
+        ],
+        "blocked": [
+          {
+            "seconds": 0.13293516705743968,
+            "peak_rss_bytes": 156499968,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint16",
+            "sha256": "157c49d49011439d9cd0e1837f2b73c4df08d24991a5c1402cf608818aea7f82",
+            "input_bytes": 18874368,
+            "output_bytes": 8405000,
+            "accumulator_bytes": 16777216,
+            "blocks": 9
+          },
+          {
+            "seconds": 0.13430395792238414,
+            "peak_rss_bytes": 156532736,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint16",
+            "sha256": "157c49d49011439d9cd0e1837f2b73c4df08d24991a5c1402cf608818aea7f82",
+            "input_bytes": 18874368,
+            "output_bytes": 8405000,
+            "accumulator_bytes": 16777216,
+            "blocks": 9
+          },
+          {
+            "seconds": 0.11354979197494686,
+            "peak_rss_bytes": 156663808,
+            "shape": [
+              2050,
+              2050
+            ],
+            "dtype": "uint16",
+            "sha256": "157c49d49011439d9cd0e1837f2b73c4df08d24991a5c1402cf608818aea7f82",
+            "input_bytes": 18874368,
+            "output_bytes": 8405000,
+            "accumulator_bytes": 16777216,
+            "blocks": 9
+          }
+        ]
+      },
+      "identical_output_hashes": true,
+      "full_median_seconds": 0.1524008329724893,
+      "full_median_peak_rss_bytes": 273481728,
+      "blocked_median_seconds": 0.13293516705743968,
+      "blocked_median_peak_rss_bytes": 156532736,
+      "peak_rss_reduction_fraction": 0.4276300023963575
+    },
+    {
+      "tile_size": 2048,
+      "depth": 8,
+      "samples": {
+        "full": [
+          {
+            "seconds": 0.6072489999933168,
+            "peak_rss_bytes": 812777472,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint8",
+            "sha256": "b8c0521139ea08b0e0a1fff0cb1233bed87d88ba3d1b70fcaabb78a4037dfc6a",
+            "input_bytes": 37748736,
+            "output_bytes": 16793604,
+            "accumulator_bytes": 268697664,
+            "blocks": null
+          },
+          {
+            "seconds": 0.5831752910744399,
+            "peak_rss_bytes": 813023232,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint8",
+            "sha256": "b8c0521139ea08b0e0a1fff0cb1233bed87d88ba3d1b70fcaabb78a4037dfc6a",
+            "input_bytes": 37748736,
+            "output_bytes": 16793604,
+            "accumulator_bytes": 268697664,
+            "blocks": null
+          },
+          {
+            "seconds": 0.5126662080874667,
+            "peak_rss_bytes": 812777472,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint8",
+            "sha256": "b8c0521139ea08b0e0a1fff0cb1233bed87d88ba3d1b70fcaabb78a4037dfc6a",
+            "input_bytes": 37748736,
+            "output_bytes": 16793604,
+            "accumulator_bytes": 268697664,
+            "blocks": null
+          }
+        ],
+        "blocked": [
+          {
+            "seconds": 0.4178177500143647,
+            "peak_rss_bytes": 200785920,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint8",
+            "sha256": "b8c0521139ea08b0e0a1fff0cb1233bed87d88ba3d1b70fcaabb78a4037dfc6a",
+            "input_bytes": 37748736,
+            "output_bytes": 16793604,
+            "accumulator_bytes": 16777216,
+            "blocks": 25
+          },
+          {
+            "seconds": 0.47636570897884667,
+            "peak_rss_bytes": 200736768,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint8",
+            "sha256": "b8c0521139ea08b0e0a1fff0cb1233bed87d88ba3d1b70fcaabb78a4037dfc6a",
+            "input_bytes": 37748736,
+            "output_bytes": 16793604,
+            "accumulator_bytes": 16777216,
+            "blocks": 25
+          },
+          {
+            "seconds": 0.3933963750023395,
+            "peak_rss_bytes": 200785920,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint8",
+            "sha256": "b8c0521139ea08b0e0a1fff0cb1233bed87d88ba3d1b70fcaabb78a4037dfc6a",
+            "input_bytes": 37748736,
+            "output_bytes": 16793604,
+            "accumulator_bytes": 16777216,
+            "blocks": 25
+          }
+        ]
+      },
+      "identical_output_hashes": true,
+      "full_median_seconds": 0.5831752910744399,
+      "full_median_peak_rss_bytes": 812777472,
+      "blocked_median_seconds": 0.4178177500143647,
+      "blocked_median_peak_rss_bytes": 200785920,
+      "peak_rss_reduction_fraction": 0.7529632317368167
+    },
+    {
+      "tile_size": 2048,
+      "depth": 16,
+      "samples": {
+        "full": [
+          {
+            "seconds": 0.6492224159883335,
+            "peak_rss_bytes": 884211712,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint16",
+            "sha256": "cdea63183ad6144edd1d0088938e086c09e818477aaa35a6159f78f159597d0c",
+            "input_bytes": 75497472,
+            "output_bytes": 33587208,
+            "accumulator_bytes": 268697664,
+            "blocks": null
+          },
+          {
+            "seconds": 0.5562495000194758,
+            "peak_rss_bytes": 884211712,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint16",
+            "sha256": "cdea63183ad6144edd1d0088938e086c09e818477aaa35a6159f78f159597d0c",
+            "input_bytes": 75497472,
+            "output_bytes": 33587208,
+            "accumulator_bytes": 268697664,
+            "blocks": null
+          },
+          {
+            "seconds": 0.5102146670687944,
+            "peak_rss_bytes": 884342784,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint16",
+            "sha256": "cdea63183ad6144edd1d0088938e086c09e818477aaa35a6159f78f159597d0c",
+            "input_bytes": 75497472,
+            "output_bytes": 33587208,
+            "accumulator_bytes": 268697664,
+            "blocks": null
+          }
+        ],
+        "blocked": [
+          {
+            "seconds": 0.4838325830642134,
+            "peak_rss_bytes": 255492096,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint16",
+            "sha256": "cdea63183ad6144edd1d0088938e086c09e818477aaa35a6159f78f159597d0c",
+            "input_bytes": 75497472,
+            "output_bytes": 33587208,
+            "accumulator_bytes": 16777216,
+            "blocks": 25
+          },
+          {
+            "seconds": 0.41883745801169425,
+            "peak_rss_bytes": 255344640,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint16",
+            "sha256": "cdea63183ad6144edd1d0088938e086c09e818477aaa35a6159f78f159597d0c",
+            "input_bytes": 75497472,
+            "output_bytes": 33587208,
+            "accumulator_bytes": 16777216,
+            "blocks": 25
+          },
+          {
+            "seconds": 0.48844170791562647,
+            "peak_rss_bytes": 255459328,
+            "shape": [
+              4098,
+              4098
+            ],
+            "dtype": "uint16",
+            "sha256": "cdea63183ad6144edd1d0088938e086c09e818477aaa35a6159f78f159597d0c",
+            "input_bytes": 75497472,
+            "output_bytes": 33587208,
+            "accumulator_bytes": 16777216,
+            "blocks": 25
+          }
+        ]
+      },
+      "identical_output_hashes": true,
+      "full_median_seconds": 0.5562495000194758,
+      "full_median_peak_rss_bytes": 884211712,
+      "blocked_median_seconds": 0.4838325830642134,
+      "blocked_median_peak_rss_bytes": 255459328,
+      "peak_rss_reduction_fraction": 0.711088052179069
+    }
+  ],
+  "notes": "Fresh process per sample; alternating backend order. Times measure composition only. Peak RSS includes interpreter, original tiles, panorama and native allocations. Matching, feature cache, file IO, GUI and export are excluded. Outputs are compared by SHA256, without changing source intensities. Synthetic results do not predict full-task memory or real SEM alignment quality. Peak RSS is available on macOS/Linux only."
+}
