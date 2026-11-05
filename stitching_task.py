@@ -78,6 +78,8 @@ class StitchTask:
     def __init__(self, stitcher_factory=SEMStitcher):
         self.state = TaskState.IDLE
         self.result = None
+        self.inspection = None
+        self.metrics = {}
         self.error = None
         self.request = None
         self.thread = None
@@ -94,6 +96,8 @@ class StitchTask:
         if self.busy:
             raise RuntimeError('Wait for the current task to finish')
         self.result = self.error = self.request = None
+        self.inspection = None
+        self.metrics = {}
         self.state = TaskState.READY if has_inputs else TaskState.IDLE
 
     def start(self, request):
@@ -101,6 +105,8 @@ class StitchTask:
             raise RuntimeError('A task is already running')
         self.request = request
         self.result = self.error = self._terminal = None
+        self.inspection = None
+        self.metrics = {}
         self._events = queue.Queue()
         self._cancel = threading.Event()
         self.state = TaskState.RUNNING
@@ -124,7 +130,11 @@ class StitchTask:
             stitcher.set_progress_callback(lambda message: self._events.put(('log', message)))
             paths, options = request.algorithm_inputs()
             result = stitcher.stitch_sequence(paths, **options)
-            self._events.put(('succeeded', result))
+            inspection = getattr(stitcher, 'last_inspection', None)
+            if inspection is not None and request.grid_shape is not None:
+                inspection = inspection.reordered([index for row in request.layout_indices() for index in row])
+            self._events.put(('succeeded', (result, inspection,
+                                            dict(getattr(stitcher, 'last_metrics', {})))))
         except StitchingCancelled:
             self._events.put(('cancelled', None))
         except Exception:
@@ -149,7 +159,7 @@ class StitchTask:
             if self._cancel.is_set() or kind == 'cancelled':
                 self.state = TaskState.CANCELLED
             elif kind == 'succeeded':
-                self.result = payload
+                self.result, self.inspection, self.metrics = payload
                 self.state = TaskState.SUCCEEDED
             else:
                 self.error = payload

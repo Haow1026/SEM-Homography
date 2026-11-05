@@ -15,6 +15,7 @@ import numpy as np
 
 from main import SEMStitcher
 from stitching_task import StitchRequest, StitchTask, TaskState, natural_sort
+from inspector import SeamInspector
 
 # ============================================================
 # 多语言翻译表  i18n
@@ -131,6 +132,7 @@ LANG['en'].update({
     'status_succeeded': 'Complete — ready to export', 'status_failed': 'Failed — check the log',
     'status_cancelled': 'Cancelled — no result to export', 'log_cancelled': 'Stitching cancelled.',
     'log_cancelling': 'Cancellation requested. Waiting for the current operation to finish.',
+    'btn_inspect': 'Inspect seams / 100%',
 })
 LANG['zh-Hans'].update({
     'subtitle': '开始前请核对文件采集顺序和扫描布局',
@@ -151,6 +153,7 @@ LANG['zh-Hans'].update({
     'status_succeeded': '拼接完成，可以导出', 'status_failed': '拼接失败，请查看日志',
     'status_cancelled': '已取消，无可导出的结果', 'log_cancelled': '拼接已取消。',
     'log_cancelling': '已请求取消，等待当前操作完成。',
+    'btn_inspect': '接缝检查 / 原分辨率',
 })
 LANG['ja'].update({
     'subtitle': '開始前に取得順序とスキャン配置を確認してください',
@@ -171,6 +174,7 @@ LANG['ja'].update({
     'status_succeeded': '完了 — 書き出し可能', 'status_failed': '失敗 — ログを確認',
     'status_cancelled': 'キャンセル済み — 結果なし', 'log_cancelled': '処理をキャンセルしました。',
     'log_cancelling': 'キャンセルを要求しました。現在の処理の終了を待っています。',
+    'btn_inspect': '継ぎ目 / 原寸を確認',
 })
 
 # ============================================================
@@ -210,6 +214,7 @@ class SEMStitcherGUI(ctk.CTk):
         self._closing = False
         self._poll_id = None
         self._preview_id = None
+        self._inspector = None
         self._layout_valid = False
         self._layout_notice = False
         self._i18n_widgets = {}
@@ -245,6 +250,8 @@ class SEMStitcherGUI(ctk.CTk):
                 self._tab_names[key] = new_name
         self._refresh_layout()
         self._render_state()
+        if self._inspector is not None and not self._inspector.closed:
+            self._inspector.set_language(self.lang)
         if self.stitched_result is None:
             self.preview_label.configure(text=self.t('preview_placeholder'))
         else:
@@ -381,8 +388,11 @@ class SEMStitcherGUI(ctk.CTk):
         self.preview_label.bind('<Configure>', self._on_preview_resize)
         self.lbl_size = ctk.CTkLabel(right, text='')
         self.lbl_size.grid(row=3, column=0, sticky='w', padx=15, pady=8)
+        self.btn_inspect = ctk.CTkButton(right, text='', height=34, command=self._on_inspect)
+        self.btn_inspect.grid(row=4, column=0, sticky='ew', padx=12, pady=(0, 8))
+        self._reg(self.btn_inspect, 'btn_inspect')
         self.btn_export = ctk.CTkButton(right, text='', height=38, command=self._on_export)
-        self.btn_export.grid(row=4, column=0, sticky='ew', padx=12, pady=(0, 15))
+        self.btn_export.grid(row=5, column=0, sticky='ew', padx=12, pady=(0, 15))
         self._reg(self.btn_export, 'btn_export')
 
     def _get_request(self):
@@ -438,6 +448,8 @@ class SEMStitcherGUI(ctk.CTk):
         self.btn_cancel.configure(state='normal' if self.task.state == TaskState.RUNNING else 'disabled',
                                   text=self.t('btn_cancelling' if self.task.state == TaskState.CANCELLING else 'btn_cancel'))
         self.btn_export.configure(state='normal' if self.task.state == TaskState.SUCCEEDED else 'disabled')
+        self.btn_inspect.configure(state='normal' if self.task.state == TaskState.SUCCEEDED
+                                  and self.task.inspection is not None else 'disabled')
         self.file_list.configure(state='disabled' if busy else 'normal')
         selection = self.file_list.curselection()
         for index, button in enumerate(self._order_buttons):
@@ -450,6 +462,9 @@ class SEMStitcherGUI(ctk.CTk):
         self.lbl_status.configure(text=self.t('status_' + self.task.state.value), text_color=color)
 
     def _clear_preview(self):
+        if self._inspector is not None:
+            self._inspector.close()
+            self._inspector = None
         if self._preview_id is not None:
             self.after_cancel(self._preview_id)
             self._preview_id = None
@@ -594,6 +609,8 @@ class SEMStitcherGUI(ctk.CTk):
 
     def _on_close(self):
         self._closing = True
+        if self._inspector is not None:
+            self._inspector.close()
         self.task.cancel()
         for timer in (self._poll_id, self._preview_id):
             if timer is not None:
@@ -609,6 +626,14 @@ class SEMStitcherGUI(ctk.CTk):
     # ================================================================
     # 预览
     # ================================================================
+    def _on_inspect(self):
+        if self.task.state != TaskState.SUCCEEDED or self.task.inspection is None:
+            return
+        if self._inspector is not None and not self._inspector.closed:
+            self._inspector.lift()
+            return
+        self._inspector = SeamInspector(self, self.stitched_result, self.task.inspection, self.lang)
+
     def _update_preview(self):
         self._preview_id = None
         if self._closing or self.stitched_result is None:

@@ -97,6 +97,7 @@ class GUIWorkflowTests(unittest.TestCase):
         self.app.geometry('1050x700')
         self.app.update()
         for widget in (self.app.btn_start, self.app.btn_cancel, self.app.btn_export,
+                       self.app.btn_inspect,
                        self.app.rows_entry, self.app.cols_entry, self.app.layout_text,
                        self.app.file_list, self.app.lbl_validation):
             with self.subTest(widget=widget.__class__.__name__):
@@ -351,6 +352,8 @@ class GUIWorkflowTests(unittest.TestCase):
             self.assertEqual(self.app.task.state, TaskState.SUCCEEDED, self.app.task.error)
             self.assertEqual(self.app.btn_export.cget('state'), 'normal')
             self.assertIsNotNone(self.app.preview_label.image)
+            self.assertEqual(self.app.btn_inspect.cget('state'), 'normal')
+            self.assertEqual(self.app.task.inspection.paths, tuple(paths))
             height, width = self.app.stitched_result.shape
             self.assertLessEqual(abs(height - 400), 2)
             self.assertLessEqual(abs(width - 480), 2)
