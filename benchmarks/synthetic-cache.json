@@ -1,0 +1,147 @@
+{
+  "dataset": "synthetic blurred random texture, 3x3 grid",
+  "tile_size": 384,
+  "input_count": 9,
+  "repeats": 3,
+  "platform": "Darwin",
+  "architecture": "arm64",
+  "python": "3.13.13",
+  "opencv": "4.13.0",
+  "numpy": "2.4.4",
+  "opencv_threads": 1,
+  "baseline_median_seconds": 12.286042833002284,
+  "cached_median_seconds": 4.754312374978326,
+  "speedup": 2.584189229479961,
+  "identical_output_hashes": true,
+  "baseline": [
+    {
+      "metrics": {
+        "feature_extractions": 72,
+        "cache_hits": 0,
+        "feature_seconds": 8.618071333155967,
+        "descriptor_bytes": 0,
+        "cache_enabled": false,
+        "load_seconds": 0.012533125001937151,
+        "match_seconds": 12.307308166986331,
+        "solve_seconds": 0.0001673750812187791,
+        "blend_seconds": 0.007245500106364489,
+        "total_seconds": 12.327421082998626
+      },
+      "peak_rss_bytes": 133513216,
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "uint8",
+      "sha256": "7962ebbf8cfba26bcfbe65895c35dd754d963231513d6b7f5bede3f978578dd5"
+    },
+    {
+      "metrics": {
+        "feature_extractions": 72,
+        "cache_hits": 0,
+        "feature_seconds": 8.580202212091535,
+        "descriptor_bytes": 0,
+        "cache_enabled": false,
+        "load_seconds": 0.008979958016425371,
+        "match_seconds": 12.269284458016045,
+        "solve_seconds": 0.00016208295710384846,
+        "blend_seconds": 0.007438458036631346,
+        "total_seconds": 12.286042833002284
+      },
+      "peak_rss_bytes": 133431296,
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "uint8",
+      "sha256": "7962ebbf8cfba26bcfbe65895c35dd754d963231513d6b7f5bede3f978578dd5"
+    },
+    {
+      "metrics": {
+        "feature_extractions": 72,
+        "cache_hits": 0,
+        "feature_seconds": 8.587999996729195,
+        "descriptor_bytes": 0,
+        "cache_enabled": false,
+        "load_seconds": 0.01477062504272908,
+        "match_seconds": 12.259235291974619,
+        "solve_seconds": 0.00016645900905132294,
+        "blend_seconds": 0.006919959094375372,
+        "total_seconds": 12.28124558296986
+      },
+      "peak_rss_bytes": 133398528,
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "uint8",
+      "sha256": "7962ebbf8cfba26bcfbe65895c35dd754d963231513d6b7f5bede3f978578dd5"
+    }
+  ],
+  "cached": [
+    {
+      "metrics": {
+        "feature_extractions": 9,
+        "cache_hits": 63,
+        "feature_seconds": 1.0764417940517887,
+        "descriptor_bytes": 20264960,
+        "cache_enabled": true,
+        "load_seconds": 0.012575750006362796,
+        "match_seconds": 4.733913374948315,
+        "solve_seconds": 0.00017266697250306606,
+        "blend_seconds": 0.007265666965395212,
+        "total_seconds": 4.754312374978326
+      },
+      "peak_rss_bytes": 155418624,
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "uint8",
+      "sha256": "7962ebbf8cfba26bcfbe65895c35dd754d963231513d6b7f5bede3f978578dd5"
+    },
+    {
+      "metrics": {
+        "feature_extractions": 9,
+        "cache_hits": 63,
+        "feature_seconds": 1.077842666883953,
+        "descriptor_bytes": 20264960,
+        "cache_enabled": true,
+        "load_seconds": 0.01070062501821667,
+        "match_seconds": 4.734131500008516,
+        "solve_seconds": 0.00016062497161328793,
+        "blend_seconds": 0.007537083001807332,
+        "total_seconds": 4.752972999936901
+      },
+      "peak_rss_bytes": 155271168,
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "uint8",
+      "sha256": "7962ebbf8cfba26bcfbe65895c35dd754d963231513d6b7f5bede3f978578dd5"
+    },
+    {
+      "metrics": {
+        "feature_extractions": 9,
+        "cache_hits": 63,
+        "feature_seconds": 1.0781006682664156,
+        "descriptor_bytes": 20264960,
+        "cache_enabled": true,
+        "load_seconds": 0.010190042085014284,
+        "match_seconds": 4.738631583051756,
+        "solve_seconds": 0.00015883299056440592,
+        "blend_seconds": 0.00695658300537616,
+        "total_seconds": 4.756317290943116
+      },
+      "peak_rss_bytes": 155402240,
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "uint8",
+      "sha256": "7962ebbf8cfba26bcfbe65895c35dd754d963231513d6b7f5bede3f978578dd5"
+    }
+  ],
+  "notes": "Fresh process per sample. Peak RSS includes interpreter, sources, descriptors and panorama; not Python heap alone. Synthetic performance is not an SEM acquisition accuracy guarantee."
+}

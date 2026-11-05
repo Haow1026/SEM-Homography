@@ -55,6 +55,7 @@ class GraphRecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.stitcher._connected_order(9, retained, 4)), 9)
         self.assertLess(max(residual for residual, edge in residuals if edge in retained), 9.1)
         self.assertTrue(any('tile_4.tif' in message and 'tile_5.tif' in message for message in self.messages))
+        self.assertEqual([(p.i, p.j) for p in self.stitcher.last_inspection.pairs if p.excluded], [(4, 5)])
 
     def test_coherent_reported_graph_keeps_all_remaining_edges(self):
         edges = [edge for edge in REPORTED_EDGES if edge[1:3] != (4, 5)]

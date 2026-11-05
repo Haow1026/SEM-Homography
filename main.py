@@ -12,6 +12,9 @@ from collections import deque
 import cv2
 import numpy as np
 import os
+import time
+
+from inspection import PairDiagnostic, StitchInspection, canvas_geometry, file_signature
 
 
 class StitchingCancelled(Exception):
@@ -69,6 +72,10 @@ class SEMStitcher:
         # ---- GUI 回调 ----
         self._progress_callback = None
         self._cancel_callback = None
+        self._feature_cache = None
+        self._measure_features = False
+        self.last_metrics = {}
+        self.last_inspection = None
 
     def set_cancel_callback(self, callback):
         """Set a thread-safe predicate, e.g. threading.Event.is_set."""
@@ -344,6 +351,24 @@ class SEMStitcher:
     # ================================================================
     # 结构对齐匹配（边缘图 SIFT + 相位相关）
     # ================================================================
+    def _features_for_image(self, image):
+        self._check_cancelled()
+        key = id(image)
+        if self._feature_cache is not None and key in self._feature_cache:
+            self.last_metrics['cache_hits'] += 1
+            return self._feature_cache[key]
+        started = time.perf_counter()
+        features = self._extract_features(self._extract_edge_map(image))
+        self._check_cancelled()
+        if self._measure_features:
+            self.last_metrics['feature_extractions'] += 1
+            self.last_metrics['feature_seconds'] += time.perf_counter() - started
+        if self._feature_cache is not None:
+            self._feature_cache[key] = features
+            if features[1] is not None:
+                self.last_metrics['descriptor_bytes'] += features[1].nbytes
+        return features
+
     def _try_match_pair(self, img_a: np.ndarray, img_b: np.ndarray,
                         label_a: str = "A", label_b: str = "B") -> tuple:
         """
@@ -358,12 +383,8 @@ class SEMStitcher:
           quality = RANSAC 内点数量（用于全局平差权重）
         """
         # ---- 提取边缘图（SIFT 用，切断高频噪点） ----
-        edge_a = self._extract_edge_map(img_a)
-        edge_b = self._extract_edge_map(img_b)
-
-        # ---- SIFT 粗对齐（在边缘图上） ----
-        kp_a, des_a = self._extract_features(edge_a)
-        kp_b, des_b = self._extract_features(edge_b)
+        kp_a, des_a = self._features_for_image(img_a)
+        kp_b, des_b = self._features_for_image(img_b)
         dx, dy, inliers, n_good = self._compute_translation(kp_a, des_a, kp_b, des_b)
 
         self._log(f"  Keypoints (edge map): {label_a}={len(kp_a)}, {label_b}={len(kp_b)}")
@@ -434,16 +455,7 @@ class SEMStitcher:
         """Blend grayscale tiles once at their global floating-point positions."""
         dtype = self._validate_images(images)
         self._check_cancelled()
-        positions = np.asarray(positions, dtype=np.float64)
-        if positions.shape != (len(images), 2) or not np.isfinite(positions).all():
-            raise ValueError("Each image requires a finite (x, y) position")
-        # Remove only solver round-off, not real subpixel displacement.
-        rounded = np.rint(positions)
-        positions = np.where(np.abs(positions - rounded) < 1e-7, rounded, positions)
-        origin = np.floor(positions.min(axis=0))
-        positions = positions - origin
-        sizes = np.array([(image.shape[1], image.shape[0]) for image in images])
-        canvas_w, canvas_h = np.ceil((positions + sizes).max(axis=0)).astype(int)
+        positions, (canvas_w, canvas_h) = canvas_geometry([image.shape for image in images], positions)
         self._log(f"  Canvas: {canvas_w} x {canvas_h}")
         sum_img = np.zeros((canvas_h, canvas_w), dtype=np.float64)
         self._check_cancelled()
@@ -665,6 +677,28 @@ class SEMStitcher:
         serpentine: bool = False,
         min_axis_overlap_ratio: float = 0.70,
         residual_threshold: float = 10.0,
+        use_feature_cache: bool = True,
+    ) -> np.ndarray:
+        """Stitch one batch; release feature descriptors on every exit path."""
+        self.last_inspection = None
+        self.last_metrics = dict(feature_extractions=0, cache_hits=0, feature_seconds=0.0,
+                                 descriptor_bytes=0, cache_enabled=use_feature_cache)
+        self._feature_cache = {} if use_feature_cache else None
+        self._measure_features = True
+        started = time.perf_counter()
+        try:
+            return self._stitch_sequence(image_paths, grid_shape, serpentine,
+                                         min_axis_overlap_ratio, residual_threshold)
+        except BaseException:
+            self.last_inspection = None
+            raise
+        finally:
+            self._feature_cache = None
+            self._measure_features = False
+            self.last_metrics['total_seconds'] = time.perf_counter() - started
+
+    def _stitch_sequence(
+        self, image_paths, grid_shape, serpentine, min_axis_overlap_ratio, residual_threshold,
     ) -> np.ndarray:
         """
         Stitch multiple images with pairwise translation constraints.
@@ -696,16 +730,20 @@ class SEMStitcher:
         self._log(f"{'=' * 60}")
 
         # ---- Phase 1: load images ----
-        images = []
+        phase_started = time.perf_counter()
+        images, signatures = [], []
         for path in image_paths:
             self._check_cancelled()
             img = cv2.imread(os.fspath(path), cv2.IMREAD_UNCHANGED)
             if img is None:
                 raise FileNotFoundError(f"Cannot read image: {path}")
             images.append(img)
+            signatures.append(file_signature(path))
             self._log(f"  Loaded: {os.path.basename(path)} ({img.shape[1]}x{img.shape[0]})")
 
         self._validate_images(images)
+        self.last_metrics['load_seconds'] = time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
 
         candidate_count = len(allowed_pairs) if allowed_pairs is not None else n * (n - 1) // 2
         self._log(f"\n--- Phase 1: Pairwise matching ({candidate_count} pairs) ---")
@@ -748,6 +786,10 @@ class SEMStitcher:
                 f"Only {len(edges)} reliable edges for {n} images; cannot form a connected graph."
             )
 
+        self.last_metrics['match_seconds'] = time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
+        measured_edges = edges[:]
+
         root, degree = self._select_anchor(n, edges)
         order = self._connected_order(n, edges, root)
         if len(order) != n:
@@ -770,6 +812,7 @@ class SEMStitcher:
             global_x, global_y, residual_x, residual_y,
             rank_x, rank_y, matrix_shape,
         ) = solution
+        self.last_metrics['solve_seconds'] = time.perf_counter() - phase_started
 
         residual_x_text = f"X residual={residual_x[0]:.1f}" if len(residual_x) > 0 else "X determined"
         residual_y_text = f"Y residual={residual_y[0]:.1f}" if len(residual_y) > 0 else "Y determined"
@@ -782,7 +825,24 @@ class SEMStitcher:
 
         # Each image is resampled once, directly into global coordinates.
         self._log("\n--- Phase 3: Subpixel feather composition ---")
+        phase_started = time.perf_counter()
         result = self._compose_images(images, list(zip(global_x, global_y)))
+        self.last_metrics['blend_seconds'] = time.perf_counter() - phase_started
+        positions, _ = canvas_geometry([image.shape for image in images], list(zip(global_x, global_y)))
+        diagnostics = []
+        for error, edge in self._edge_residuals(measured_edges, global_x, global_y):
+            quality, i, j, dx, dy = edge
+            diagnostics.append(PairDiagnostic(
+                i, j, (float(dx), float(dy)),
+                (float(global_x[i] - global_x[j]), float(global_y[i] - global_y[j])),
+                int(quality), error, edge not in edges,
+            ))
+        self.last_inspection = StitchInspection(
+            tuple(os.path.abspath(path) for path in image_paths), tuple(image.shape for image in images),
+            tuple(map(tuple, positions)), tuple(signatures), tuple(diagnostics),
+        )
+        self._log(f"  Features: {self.last_metrics['feature_extractions']} extractions, "
+                  f"{self.last_metrics['cache_hits']} cache hits")
 
         self._log(f"\n{'=' * 60}")
         self._log(f"All {n} images stitched!")
