@@ -122,6 +122,7 @@ LANG['en'].update({
     'layout_hint': 'Top row first; numbers refer to the file list.',
     'layout_auto': 'Automatic matching (no grid constraint)',
     'layout_empty': 'Select at least two images to preview the layout.',
+    'layout_grid_reset': 'The new image count does not fit the previous grid. Automatic matching is enabled; set a new grid if needed.',
     'grid_positive': 'Rows and columns must be positive whole numbers.',
     'grid_count': 'Grid needs {expected} images; {actual} selected.',
     'msg_settings': 'Check scan settings', 'btn_cancel': 'Cancel', 'btn_cancelling': 'Cancelling…',
@@ -141,6 +142,7 @@ LANG['zh-Hans'].update({
     'layout_hint': '上方为首行；数字对应文件列表编号。',
     'layout_auto': '自动匹配（不限制网格邻接关系）',
     'layout_empty': '选择至少两张图像后预览布局。',
+    'layout_grid_reset': '新批次图像数量与原网格不符，已切换为自动匹配；如需网格，请重新设置行列数。',
     'grid_positive': '行数和列数必须为正整数。',
     'grid_count': '网格需要 {expected} 张图像，当前选择 {actual} 张。',
     'msg_settings': '请检查扫描设置', 'btn_cancel': '取消', 'btn_cancelling': '正在取消…',
@@ -160,6 +162,7 @@ LANG['ja'].update({
     'layout_hint': '上から順に表示。番号はファイル一覧に対応します。',
     'layout_auto': '自動マッチング（グリッド制約なし）',
     'layout_empty': '画像を2枚以上選択すると配置を表示します。',
+    'layout_grid_reset': '新しい画像数が以前のグリッドと異なるため自動マッチングに切り替えました。必要に応じてグリッドを再設定してください。',
     'grid_positive': '行数と列数は正の整数で指定してください。',
     'grid_count': 'グリッドには {expected} 枚必要です。選択済み: {actual} 枚。',
     'msg_settings': 'スキャン設定を確認', 'btn_cancel': 'キャンセル', 'btn_cancelling': 'キャンセル中…',
@@ -208,6 +211,7 @@ class SEMStitcherGUI(ctk.CTk):
         self._poll_id = None
         self._preview_id = None
         self._layout_valid = False
+        self._layout_notice = False
         self._i18n_widgets = {}
         self.use_grid = tk.BooleanVar(self, value=False)
         self.rows = tk.StringVar(self, value='3')
@@ -367,7 +371,11 @@ class SEMStitcherGUI(ctk.CTk):
         label = ctk.CTkLabel(right, text='', font=ctk.CTkFont(size=14, weight='bold'))
         label.grid(row=1, column=0, sticky='w', padx=15, pady=(0, 8))
         self._reg(label, 'preview_title')
-        self.preview_label = ctk.CTkLabel(right, text='', width=300, height=250,
+        # CTkLabel.configure(image=None) does not clear the underlying Tk image.
+        # Keep a real, transparent placeholder so releasing a completed preview
+        # cannot leave Tk referencing a deleted PhotoImage on the next run.
+        self._empty_preview = ctk.CTkImage(Image.new('RGBA', (1, 1)), size=(1, 1))
+        self.preview_label = ctk.CTkLabel(right, text='', image=self._empty_preview, width=300, height=250,
                                           fg_color='gray15', corner_radius=8, text_color='gray60')
         self.preview_label.grid(row=2, column=0, sticky='nsew', padx=12)
         self.preview_label.bind('<Configure>', self._on_preview_resize)
@@ -402,6 +410,8 @@ class SEMStitcherGUI(ctk.CTk):
                 self._layout_valid = True
                 if request.grid_shape is None:
                     text = self.t('layout_auto')
+                    if self._layout_notice:
+                        text += '\n\n' + self.t('layout_grid_reset')
                 else:
                     lines = []
                     for indices in request.layout_indices():
@@ -440,7 +450,10 @@ class SEMStitcherGUI(ctk.CTk):
         self.lbl_status.configure(text=self.t('status_' + self.task.state.value), text_color=color)
 
     def _clear_preview(self):
-        self.preview_label.configure(image=None, text=self.t('preview_placeholder'))
+        if self._preview_id is not None:
+            self.after_cancel(self._preview_id)
+            self._preview_id = None
+        self.preview_label.configure(image=self._empty_preview, text=self.t('preview_placeholder'))
         self.preview_label.image = None
         self.lbl_size.configure(text='')
 
@@ -448,6 +461,7 @@ class SEMStitcherGUI(ctk.CTk):
         if self.task.busy:
             return
         self.task.reset(has_inputs=len(self.image_paths) >= 2)
+        self._layout_notice = False
         self.progress_bar.stop()
         self.progress_bar.set(0)
         self._clear_preview()
@@ -468,9 +482,21 @@ class SEMStitcherGUI(ctk.CTk):
         if len(paths) < 2:
             messagebox.showwarning(self.t('msg_few'), self.t('msg_few_detail', n=len(paths)))
             return
+        previous_count = len(self.image_paths)
         self.image_paths = natural_sort(paths)
+        reset_grid = False
+        if previous_count and previous_count != len(paths) and self.use_grid.get():
+            try:
+                self._get_request()
+            except ValueError:
+                self.use_grid.set(False)
+                reset_grid = True
         self._refresh_file_list()
         self._on_inputs_changed()
+        if reset_grid:
+            self._layout_notice = True
+            self._refresh_layout()
+            self._append_log(self.t('layout_grid_reset'))
         self.tabs.set(self._tab_names['tab_files'])
 
     def _refresh_file_list(self, selected=None):

@@ -22,6 +22,8 @@ except ImportError as error:
 class GUIWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.app = SEMStitcherGUI()
+        self.callback_errors = []
+        self.app.report_callback_exception = lambda kind, error, trace: self.callback_errors.append(str(error))
         self.app.withdraw()
         self.app.lang = 'en'
         self.app._apply_language()
@@ -36,6 +38,7 @@ class GUIWorkflowTests(unittest.TestCase):
         for worker in self.workers:
             if worker.thread is not None:
                 worker.thread.join(timeout=3)
+        self.assertEqual(self.callback_errors, [], 'Unexpected Tk callback errors')
 
     def load(self, count=2):
         self.app._load_files([f'tile_{i}.tif' for i in range(count)])
@@ -197,6 +200,102 @@ class GUIWorkflowTests(unittest.TestCase):
         self.assertEqual(self.app.btn_export.cget('state'), 'disabled')
         self.assertEqual(self.app.progress_bar.get(), 0)
 
+    def test_success_can_select_new_images_and_complete_a_second_run(self):
+        self.load()
+        worker = self.install_worker()
+        self.app._on_start()
+        self.finish_worker(worker)
+        self.assertEqual(self.app.task.state, TaskState.SUCCEEDED)
+        self.assertEqual(self.app.btn_select.cget('state'), 'normal')
+        with patch('gui.filedialog.askopenfilenames', return_value=('next_2.tif', 'next_1.tif')) as dialog:
+            self.app.btn_select.invoke()
+            dialog.assert_called_once()
+        self.assertEqual(self.app.image_paths, ['next_1.tif', 'next_2.tif'])
+        self.assertEqual(self.app.file_list.get(0, 'end'), ('01  next_1.tif', '02  next_2.tif'))
+        self.assertEqual(self.app.task.state, TaskState.READY)
+        self.assertEqual(self.app.btn_export.cget('state'), 'disabled')
+        self.assertIsNone(self.app.stitched_result)
+        self.app._on_start()
+        self.finish_worker(worker)
+        self.assertEqual(worker.paths, ('next_1.tif', 'next_2.tif'))
+        self.assertEqual(self.app.task.state, TaskState.SUCCEEDED)
+        self.assertEqual(self.app.btn_export.cget('state'), 'normal')
+
+    def test_success_can_reload_and_change_settings_multiple_times(self):
+        self.load()
+        worker = self.install_worker()
+        self.app._on_start()
+        self.finish_worker(worker)
+        for index in range(3):
+            self.app._load_files([f'batch_{index}_1.tif', f'batch_{index}_2.tif'])
+            self.app.rows.set('1')
+            self.app.cols.set('2')
+            self.app.use_grid.set(True)
+            self.app._on_inputs_changed()
+            self.app._set_lang('简体中文' if index % 2 == 0 else 'English')
+            self.assertEqual(self.app.btn_start.cget('state'), 'normal')
+            self.app._on_start()
+            self.finish_worker(worker)
+            self.assertEqual(self.app.task.state, TaskState.SUCCEEDED)
+
+    def test_dismissing_file_dialog_keeps_successful_result(self):
+        self.load()
+        worker = self.install_worker()
+        self.app._on_start()
+        self.finish_worker(worker)
+        previous_result = self.app.stitched_result
+        previous_paths = self.app.image_paths[:]
+        with patch('gui.filedialog.askopenfilenames', return_value=()):
+            self.app.btn_select.invoke()
+        self.assertIs(self.app.stitched_result, previous_result)
+        self.assertEqual(self.app.image_paths, previous_paths)
+        self.assertEqual(self.app.task.state, TaskState.SUCCEEDED)
+        self.assertEqual(self.app.btn_export.cget('state'), 'normal')
+
+    def test_new_count_releases_previous_grid_constraint_and_allows_restart(self):
+        self.load()
+        worker = self.install_worker()
+        self.app.rows.set('1')
+        self.app.cols.set('2')
+        self.app.use_grid.set(True)
+        self.app._on_inputs_changed()
+        self.app._on_start()
+        self.finish_worker(worker)
+        self.app._load_files(['next_1.tif', 'next_2.tif', 'next_3.tif'])
+        self.assertFalse(self.app.use_grid.get())
+        self.assertEqual(self.app.btn_start.cget('state'), 'normal')
+        self.assertEqual(self.app.lbl_validation.cget('text'), '')
+        self.assertIn('Automatic matching is enabled', self.app.layout_text.get('1.0', 'end'))
+        self.app._on_start()
+        self.finish_worker(worker)
+        self.assertEqual(worker.options, {})
+        self.assertEqual(self.app.task.state, TaskState.SUCCEEDED)
+
+    def test_same_count_keeps_grid_and_scan_direction(self):
+        self.load(6)
+        self.app.rows.set('2')
+        self.app.cols.set('3')
+        self.app.use_grid.set(True)
+        self.app.serpentine.set(True)
+        self.app.first_rtl.set(True)
+        self.app._on_inputs_changed()
+        self.app._load_files([f'next_{i}.tif' for i in range(6)])
+        self.assertTrue(self.app.use_grid.get())
+        self.assertTrue(self.app.serpentine.get())
+        self.assertTrue(self.app.first_rtl.get())
+        self.assertEqual(self.app.btn_start.cget('state'), 'normal')
+
+    def test_new_count_keeps_grid_if_user_already_set_matching_dimensions(self):
+        self.load()
+        self.app.rows.set('1')
+        self.app.cols.set('3')
+        self.app.use_grid.set(True)
+        self.app._on_inputs_changed()
+        self.assertEqual(self.app.btn_start.cget('state'), 'disabled')
+        self.app._load_files(['a.tif', 'b.tif', 'c.tif'])
+        self.assertTrue(self.app.use_grid.get())
+        self.assertEqual(self.app.btn_start.cget('state'), 'normal')
+
     def test_language_switch_preserves_count_preview_and_running_controls(self):
         self.load()
         worker = self.install_worker()
@@ -255,6 +354,21 @@ class GUIWorkflowTests(unittest.TestCase):
             height, width = self.app.stitched_result.shape
             self.assertLessEqual(abs(height - 400), 2)
             self.assertLessEqual(abs(width - 480), 2)
+            # A real second batch with a different count must be usable without
+            # restarting the window or inheriting the obsolete 2x3 constraint.
+            self.app._load_files(paths[:2])
+            self.assertFalse(self.app.use_grid.get())
+            self.assertEqual(self.app.btn_start.cget('state'), 'normal')
+            self.app._on_start()
+            deadline = time.monotonic() + 20
+            while self.app.task.busy and time.monotonic() < deadline:
+                self.app.update()
+                time.sleep(0.01)
+            self.assertEqual(self.app.task.state, TaskState.SUCCEEDED, self.app.task.error)
+            self.assertEqual(self.app.btn_export.cget('state'), 'normal')
+            height, width = self.app.stitched_result.shape
+            self.assertLessEqual(abs(height - 320), 2)
+            self.assertLessEqual(abs(width - 400), 2)
 
 
 if __name__ == '__main__':
