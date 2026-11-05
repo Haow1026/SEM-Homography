@@ -77,6 +77,19 @@ class FeatureCacheTests(unittest.TestCase):
         self.assertEqual(extract.call_count, 9)
         self.assertIsNone(self.stitcher._feature_cache)
 
+    def test_features_are_released_before_composition_starts(self):
+        compose = self.stitcher._compose_images
+
+        def check_released(*args):
+            self.assertGreater(self.stitcher.last_metrics['descriptor_bytes'], 0)
+            self.assertIsNone(self.stitcher._feature_cache)
+            self.assertFalse(self.stitcher._measure_features)
+            return compose(*args)
+
+        with patch.object(self.stitcher, '_compose_images', side_effect=check_released) as blend:
+            self.stitcher.stitch_sequence(self.paths[:2])
+        blend.assert_called_once()
+
     def test_standalone_feature_lookup_does_not_change_completed_batch_metrics(self):
         self.stitcher.stitch_sequence(self.paths[:2])
         metrics = self.stitcher.last_metrics.copy()

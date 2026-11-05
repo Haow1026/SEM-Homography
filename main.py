@@ -421,50 +421,98 @@ class SEMStitcher:
                 raise ValueError("All images must have the same bit depth")
         return dtype
 
-    def _blend_onto_canvas(self, sum_img, sum_weight, new_img, x_pos, y_pos):
-        """Accumulate a translated tile with positive distance-to-edge weights.
+    def _blend_onto_canvas(self, sum_img, sum_weight, new_img, x_pos, y_pos,
+                           canvas_origin=(0, 0)):
+        """Accumulate the part of a tile visible in a canvas block.
 
-        Warp premultiplied intensities and weights together. This avoids dark
-        interpolation borders and keeps the result independent of tile order,
-        including at three-/four-tile junctions. Only a tile-sized ROI is warped.
+        Weights always measure distance to the original tile edges, never to
+        block boundaries. A one-pixel source halo preserves bilinear samples
+        across those boundaries. Warp premultiplied intensities and weights
+        together to avoid dark borders, including at multi-tile junctions.
         """
         self._check_cancelled()
         h, w = new_img.shape
         x0, y0 = int(np.floor(x_pos)), int(np.floor(y_pos))
         x1, y1 = int(np.ceil(x_pos + w)), int(np.ceil(y_pos + h))
-        if x0 < 0 or y0 < 0 or x1 > sum_img.shape[1] or y1 > sum_img.shape[0]:
-            raise ValueError("Translated image falls outside the canvas")
+        origin_x, origin_y = canvas_origin
+        left, top = max(x0, origin_x), max(y0, origin_y)
+        right = min(x1, origin_x + sum_img.shape[1])
+        bottom = min(y1, origin_y + sum_img.shape[0])
+        if left >= right or top >= bottom:
+            return
 
-        x_dist = np.minimum(np.arange(w) + 1, w - np.arange(w))
-        y_dist = np.minimum(np.arange(h) + 1, h - np.arange(h))
-        weights = np.minimum(y_dist[:, None], x_dist[None, :]).astype(np.float64)
-        weighted = new_img.astype(np.float64) * weights
         fractional_x, fractional_y = x_pos - x0, y_pos - y0
+        # An output pixel samples at (output - translation). Retain the source
+        # pixel immediately before a crop whenever that axis is fractional.
+        sx0 = max(0, left - x0 - int(fractional_x != 0.0))
+        sy0 = max(0, top - y0 - int(fractional_y != 0.0))
+        sx1, sy1 = min(w, right - x0), min(h, bottom - y0)
+        xs, ys = np.arange(sx0, sx1), np.arange(sy0, sy1)
+        x_dist = np.minimum(xs + 1, w - xs)
+        y_dist = np.minimum(ys + 1, h - ys)
+        weights = np.minimum(y_dist[:, None], x_dist[None, :]).astype(np.float64)
+        weighted = np.multiply(new_img[sy0:sy1, sx0:sx1], weights, dtype=np.float64)
         if fractional_x != 0.0 or fractional_y != 0.0:
-            transform = np.array([[1, 0, fractional_x], [0, 1, fractional_y]], dtype=np.float64)
-            size = (x1 - x0, y1 - y0)
+            transform = np.array([[1, 0, fractional_x + sx0 - (left - x0)],
+                                  [0, 1, fractional_y + sy0 - (top - y0)]], dtype=np.float64)
+            size = (right - left, bottom - top)
             weighted = cv2.warpAffine(weighted, transform, size, flags=cv2.INTER_LINEAR,
                                       borderMode=cv2.BORDER_CONSTANT, borderValue=0)
             self._check_cancelled()
             weights = cv2.warpAffine(weights, transform, size, flags=cv2.INTER_LINEAR,
                                      borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        sum_img[y0:y1, x0:x1] += weighted
-        sum_weight[y0:y1, x0:x1] += weights
+        region = np.s_[top-origin_y:bottom-origin_y, left-origin_x:right-origin_x]
+        sum_img[region] += weighted
+        sum_weight[region] += weights
 
-    def _compose_images(self, images, positions):
-        """Blend grayscale tiles once at their global floating-point positions."""
+    def _compose_images(self, images, positions, *, block_size=1024):
+        """Blend at global subpixel positions with bounded floating-point buffers.
+
+        The final uint8/uint16 panorama and source tiles still reside in memory;
+        only the floating-point accumulation and resampling work is blocked.
+        """
         dtype = self._validate_images(images)
+        if isinstance(block_size, bool) or not isinstance(block_size, (int, np.integer)) or block_size <= 0:
+            raise ValueError("block_size must be a positive integer")
         self._check_cancelled()
         positions, (canvas_w, canvas_h) = canvas_geometry([image.shape for image in images], positions)
         self._log(f"  Canvas: {canvas_w} x {canvas_h}")
-        sum_img = np.zeros((canvas_h, canvas_w), dtype=np.float64)
+        result = np.empty((canvas_h, canvas_w), dtype=dtype)
+        buffer_shape = (min(block_size, canvas_h), min(block_size, canvas_w))
+        sum_buffer = np.empty(buffer_shape, dtype=np.float64)
+        weight_buffer = np.empty_like(sum_buffer)
+        bounds = [(int(np.floor(x)), int(np.floor(y)),
+                   int(np.ceil(x + image.shape[1])), int(np.ceil(y + image.shape[0])))
+                  for image, (x, y) in zip(images, positions)]
+        blocks = 0
+        self.last_metrics.update(blend_block_size=int(block_size), blend_blocks=0,
+                                 blend_accumulator_bytes=sum_buffer.nbytes + weight_buffer.nbytes,
+                                 output_bytes=result.nbytes)
+        self._log(f"  Blend in blocks of up to {block_size} x {block_size} pixels")
+        for top in range(0, canvas_h, block_size):
+            bottom = min(top + block_size, canvas_h)
+            row_tiles = [i for i, (_, y0, _, y1) in enumerate(bounds) if y0 < bottom and y1 > top]
+            for left in range(0, canvas_w, block_size):
+                self._check_cancelled()
+                right = min(left + block_size, canvas_w)
+                sum_img = sum_buffer[:bottom-top, :right-left]
+                sum_weight = weight_buffer[:bottom-top, :right-left]
+                sum_img.fill(0)
+                sum_weight.fill(0)
+                for i in row_tiles:
+                    x0, _, x1, _ = bounds[i]
+                    if x0 < right and x1 > left:
+                        self._blend_onto_canvas(sum_img, sum_weight, images[i],
+                                                *positions[i], (left, top))
+                self._check_cancelled()
+                np.divide(sum_img, sum_weight, out=sum_img, where=sum_weight > 0)
+                np.rint(sum_img, out=sum_img)
+                np.clip(sum_img, 0, np.iinfo(dtype).max, out=sum_img)
+                result[top:bottom, left:right] = sum_img
+                blocks += 1
+                self.last_metrics['blend_blocks'] = blocks
         self._check_cancelled()
-        sum_weight = np.zeros_like(sum_img)
-        for image, (x_pos, y_pos) in zip(images, positions):
-            self._blend_onto_canvas(sum_img, sum_weight, image, x_pos, y_pos)
-        self._check_cancelled()
-        np.divide(sum_img, sum_weight, out=sum_img, where=sum_weight > 0)
-        return np.clip(np.rint(sum_img), 0, np.iinfo(dtype).max).astype(dtype)
+        return result
 
     # ================================================================
     # 配准图约束、全局定位与合成
@@ -780,6 +828,11 @@ class SEMStitcher:
                     f"  OK quality={quality}, overlap={overlap_w:.0f}x{overlap_h:.0f} px, "
                     f"axis ratio={axis_ratio:.2f}"
                 )
+
+        # Matching is complete; descriptors/keypoints are no longer needed by
+        # the graph solver, compositor or inspection report.
+        self._feature_cache = None
+        self._measure_features = False
 
         if len(edges) < n - 1:
             raise RuntimeError(
