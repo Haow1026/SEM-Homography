@@ -4,7 +4,7 @@ SEM 图像拼接工具 (Image Stitching for SEM)
 使用 SIFT + FLANN + RANSAC 纯平移向量拼接多张扫描电子显微镜图像。
 - 纯平移变换（2 DOF）：SEM stage 仅做 XY 移动，不做旋转和缩放
 - 透明度羽化融合（Opacity Blending）：重叠区域线性渐变过渡，消除拼接缝
-- 顺序拼接：逐张增量拼接，支持任意数量图像
+- 全局平差定位 + 亚像素羽化融合，支持多图网格
 """
 
 import argparse
@@ -76,19 +76,27 @@ class SEMStitcher:
         else:
             print(msg)
 
+    @staticmethod
+    def _matching_image(img):
+        """Create an 8-bit feature image without modifying source intensities."""
+        SEMStitcher._validate_images([img])
+        if img.dtype == np.uint8:
+            return img
+        return cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
     # ================================================================
     # 预处理：CLAHE 增强对比度（仅用于特征提取，不修改原图）
     # ================================================================
     def _preprocess(self, img: np.ndarray) -> np.ndarray:
         """对灰度图应用 CLAHE 增强局部对比度"""
-        return self.clahe.apply(img)
+        return self.clahe.apply(self._matching_image(img))
 
     # ================================================================
     # 边缘图提取：降噪 → Sobel → 归一化，强制匹配宏观结构
     # ================================================================
     def _extract_edge_map(self, img: np.ndarray) -> np.ndarray:
         """
-        提取边缘梯度幅值图，用于相位相关精细对齐。
+        提取边缘梯度幅值图，用于 SIFT 粗对齐。
 
         1) CLAHE 增强局部对比度（提升暗区的梯度响应）
         2) GaussianBlur 模糊掉高频划痕/噪点（σ≈3, kernel=11）
@@ -96,7 +104,7 @@ class SEMStitcher:
         4) 归一化到 0-255
         """
         # 先增强对比度，否则暗区 Sobel 梯度太弱
-        enhanced = self.clahe.apply(img)
+        enhanced = self._preprocess(img)
         # 强降噪：模糊掉划痕和细微纹理，保留宏观结构
         blurred = cv2.GaussianBlur(enhanced, (11, 11), 3.0)
         # Sobel 梯度幅值
@@ -226,18 +234,36 @@ class SEMStitcher:
         patch1 = img1[i1_y1:i1_y1 + oh, i1_x1:i1_x1 + ow].astype(np.float32)
         patch2 = img2[oy1:oy1 + oh, ox1:ox1 + ow].astype(np.float32)
 
+        # Remove the DC component; featureless overlaps cannot constrain a shift.
+        patch1 -= patch1.mean()
+        patch2 -= patch2.mean()
+        if patch1.std() < 1e-6 or patch2.std() < 1e-6:
+            return 0.0, 0.0
+
         # Hann 窗：抑制 FFT 边缘效应
         window = np.outer(np.hanning(oh), np.hanning(ow)).astype(np.float32)
+
+        # phaseCorrelate centres its peak at half the padded FFT dimensions.
+        # Odd optimal sizes (e.g. 225) introduce a half-pixel offset. Explicitly
+        # pad both windowed patches to even optimal sizes before correlation.
+        fft_h, fft_w = cv2.getOptimalDFTSize(oh), cv2.getOptimalDFTSize(ow)
+        if fft_h % 2:
+            fft_h = cv2.getOptimalDFTSize(fft_h + 1)
+        if fft_w % 2:
+            fft_w = cv2.getOptimalDFTSize(fft_w + 1)
+        padding = ((0, fft_h - oh), (0, fft_w - ow))
 
         # 相位相关
         try:
             shift, response = cv2.phaseCorrelate(
-                patch1 * window, patch2 * window
+                np.pad(patch1 * window, padding), np.pad(patch2 * window, padding)
             )
-            dx_fine = float(shift[0])
-            dy_fine = float(shift[1])
-            if response < 0.05:
-                dx_fine, dy_fine = 0.0, 0.0
+            if not np.isfinite([*shift, response]).all() or response < 0.05:
+                return 0.0, 0.0
+            # The patches were cropped at the *rounded* coarse shift. Convert
+            # their residual back to a correction of the original float shift.
+            dx_fine = dx_int + float(shift[0]) - dx_coarse
+            dy_fine = dy_int + float(shift[1]) - dy_coarse
             # 修正幅度 >10px → 相位相关跳到错误圆孔，丢弃
             if abs(dx_fine) > 10.0 or abs(dy_fine) > 10.0:
                 dx_fine, dy_fine = 0.0, 0.0
@@ -248,110 +274,9 @@ class SEMStitcher:
 
     # ================================================================
     # 线性羽化融合 (Linear Blending)
-    def _blend_images(
-        self,
-        img1: np.ndarray,
-        img2: np.ndarray,
-        dx: float,
-        dy: float,
-    ) -> np.ndarray:
-        """
-        将 img1 平移 (dx, dy) 后与参考图 img2 融合。
-
-        img2 是参考图，放在画布上固定不动。
-        img1 由 (dx, dy) 指定其在画布上相对于 img2 的位移。
-        在两张图的重叠区域使用线性羽化融合，消除拼接缝。
-
-        返回:
-            融合后的 uint8 灰度图
-        """
-        h1, w1 = img1.shape
-        h2, w2 = img2.shape
-
-        # ---- 将浮点位移取整（确保像素对齐） ----
-        dx_int = int(round(dx))
-        dy_int = int(round(dy))
-
-        # ---- 计算两张图在画布上的整数位置 ----
-        x2, y2 = 0, 0         # img2（参考）在原点
-        x1, y1 = dx_int, dy_int  # img1 平移后
-
-        # ---- 把负坐标平移到正坐标 ----
-        x_min = min(x1, x2)
-        y_min = min(y1, y2)
-        x1 -= x_min
-        x2 -= x_min
-        y1 -= y_min
-        y2 -= y_min
-
-        # ---- 画布尺寸 ----
-        canvas_w = max(x1 + w1, x2 + w2)
-        canvas_h = max(y1 + h1, y2 + h2)
-
-        # ---- 浮点画布（用于加权累加） ----
-        sum_img = np.zeros((canvas_h, canvas_w), dtype=np.float64)
-        sum_weight = np.zeros((canvas_h, canvas_w), dtype=np.float64)
-
-        # ---- 初始权重全 1 ----
-        w1_mask = np.ones((h1, w1), dtype=np.float64)
-        w2_mask = np.ones((h2, w2), dtype=np.float64)
-
-        # ---- 计算重叠区域（画布坐标，整型） ----
-        ox1 = max(x1, x2)
-        oy1 = max(y1, y2)
-        ox2 = min(x1 + w1, x2 + w2)
-        oy2 = min(y1 + h1, y2 + h2)
-        ow = ox2 - ox1  # 重叠宽度 (int)
-        oh = oy2 - oy1  # 重叠高度 (int)
-
-        if ow > 0 and oh > 0:
-            # 重叠区域在各自图像中的局部坐标
-            o1_x1 = ox1 - x1
-            o1_y1 = oy1 - y1
-            o1_x2 = o1_x1 + ow
-            o1_y2 = o1_y1 + oh
-
-            o2_x1 = ox1 - x2
-            o2_y1 = oy1 - y2
-            o2_x2 = o2_x1 + ow
-            o2_y2 = o2_y1 + oh
-
-            # 沿重叠区域较窄的方向做线性渐变
-            if ow <= oh:
-                # 水平融合: ramp 从左到右 [0 → 1], shape (1, ow)
-                ramp = np.linspace(0, 1, ow, dtype=np.float64)[np.newaxis, :]
-                if x1 < x2:
-                    # img1 在左 (权重从左到右 1→0), img2 在右 (0→1)
-                    w1_mask[o1_y1:o1_y2, o1_x1:o1_x2] = 1.0 - ramp
-                    w2_mask[o2_y1:o2_y2, o2_x1:o2_x2] = ramp
-                else:
-                    # img2 在左, img1 在右
-                    w2_mask[o2_y1:o2_y2, o2_x1:o2_x2] = 1.0 - ramp
-                    w1_mask[o1_y1:o1_y2, o1_x1:o1_x2] = ramp
-            else:
-                # 垂直融合: ramp 从上到下 [0 → 1], shape (oh, 1)
-                ramp = np.linspace(0, 1, oh, dtype=np.float64)[:, np.newaxis]
-                if y1 < y2:
-                    # img1 在上 (权重从上到下 1→0), img2 在下 (0→1)
-                    w1_mask[o1_y1:o1_y2, o1_x1:o1_x2] = 1.0 - ramp
-                    w2_mask[o2_y1:o2_y2, o2_x1:o2_x2] = ramp
-                else:
-                    # img2 在上, img1 在下
-                    w2_mask[o2_y1:o2_y2, o2_x1:o2_x2] = 1.0 - ramp
-                    w1_mask[o1_y1:o1_y2, o1_x1:o1_x2] = ramp
-
-        # ---- 将两张图累加到画布（加权） ----
-        sum_img[y1:y1 + h1, x1:x1 + w1] += img1.astype(np.float64) * w1_mask
-        sum_weight[y1:y1 + h1, x1:x1 + w1] += w1_mask
-
-        sum_img[y2:y2 + h2, x2:x2 + w2] += img2.astype(np.float64) * w2_mask
-        sum_weight[y2:y2 + h2, x2:x2 + w2] += w2_mask
-
-        # ---- 归一化（避免除以零） ----
-        valid = sum_weight > 1e-6
-        sum_img[valid] /= sum_weight[valid]
-
-        return np.clip(np.round(sum_img), 0, 255).astype(np.uint8)
+    def _blend_images(self, img1, img2, dx, dy) -> np.ndarray:
+        """Place img1 at (dx, dy) relative to img2, retaining subpixel shifts."""
+        return self._compose_images([img1, img2], [(dx, dy), (0.0, 0.0)])
 
     # ================================================================
     # 拼接两 images（核心方法）
@@ -370,28 +295,13 @@ class SEMStitcher:
             label1: 图像1的名称标签（用于日志）
             label2: 图像2的名称标签（用于日志）
         返回:
-            拼接后的 uint8 灰度图
+            拼接后保持输入位深的灰度图
         """
-        # 1. 预处理（CLAHE）
-        img1_enhanced = self._preprocess(img1)
-        img2_enhanced = self._preprocess(img2)
-
-        # 2. 特征提取
-        kp1, des1 = self._extract_features(img1_enhanced)
-        kp2, des2 = self._extract_features(img2_enhanced)
-        self._log(f"  Keypoints: {label1}={len(kp1)}, {label2}={len(kp2)}")
-
-        # 3. 计算平移量
-        dx, dy, inliers, n_good = self._compute_translation(kp1, des1, kp2, des2)
-
+        # Use the same coarse/fine registration path as multi-image stitching.
+        dx, dy, quality = self._try_match_pair(img1, img2, label1, label2)
         if dx is None:
-            raise RuntimeError(
-                f"无法计算平移量！内点={inliers}, Good Matches={n_good}。"
-                f"请检查图像重叠是否足够。"
-            )
-
-        self._log(f"  Good Matches: {n_good}, RANSAC inliers: {inliers}")
-        self._log(f"  Translation: Δx={dx:.1f} px, Δy={dy:.1f} px")
+            raise RuntimeError("无法计算平移量，请检查图像是否有足够的重叠和纹理。")
+        self._log(f"  Inliers: {quality}, translation: ({dx:.3f}, {dy:.3f}) px")
 
         # 4. 融合拼接（保持原图亮度，仅重叠区羽化过渡）
         result = self._blend_images(img1, img2, dx, dy)
@@ -419,11 +329,11 @@ class SEMStitcher:
 
         1) 提取边缘图 (GaussianBlur + Sobel)
         2) 在边缘图上 SIFT → FLANN → RANSAC 粗对齐
-        3) 在边缘图上相位相关精细对齐
+        3) 在原始灰度重叠区上相位相关精细对齐
 
         返回: (dx, dy, quality)
           dx, dy  = img_a → img_b 的总平移量（None 表示匹配失败）
-          quality = RANSAC 内点数量（用于 MST 边权重）
+          quality = RANSAC 内点数量（用于全局平差权重）
         """
         # ---- 提取边缘图（SIFT 用，切断高频噪点） ----
         edge_a = self._extract_edge_map(img_a)
@@ -444,115 +354,78 @@ class SEMStitcher:
         if dx is None:
             return None, None, 0
 
-        # ---- 相位相关精细对齐（在 CLAHE 图上，保留完整圆孔结构） ----
-        enhanced_a = self._preprocess(img_a)
-        enhanced_b = self._preprocess(img_b)
-        dx_fine, dy_fine = self._fine_align_phase(enhanced_a, enhanced_b, dx, dy)
+        # Refine on original intensities; independent CLAHE tile boundaries can
+        # introduce artificial structure in otherwise identical overlap patches.
+        dx_fine, dy_fine = self._fine_align_phase(img_a, img_b, dx, dy)
 
         if abs(dx_fine) > 0.01 or abs(dy_fine) > 0.01:
             self._log(f"  Phase corr fine: Δx={dx_fine:.2f}, Δy={dy_fine:.2f} px")
 
-        return dx, dy, inliers  # quality = inlier count
+        return dx + dx_fine, dy + dy_fine, inliers
 
-    # ================================================================
-    # 将单 imagesAdd到预分配的浮点画布（含曝光补偿 + 羽化融合）
-    # ================================================================
-    def _blend_onto_canvas(self,
-                           sum_img: np.ndarray,
-                           sum_weight: np.ndarray,
-                           new_img: np.ndarray,
-                           x_pos: int, y_pos: int) -> None:
+    @staticmethod
+    def _validate_images(images):
+        """Preserve scientific grayscale data; never silently mix bit depths."""
+        if not images:
+            raise ValueError("No images to compose")
+        dtype = images[0].dtype
+        for image in images:
+            if image.ndim != 2 or image.size == 0:
+                raise ValueError("Expected non-empty grayscale images")
+            if image.dtype not in (np.uint8, np.uint16):
+                raise ValueError("Only uint8 and uint16 grayscale images are supported")
+            if image.dtype != dtype:
+                raise ValueError("All images must have the same bit depth")
+        return dtype
+
+    def _blend_onto_canvas(self, sum_img, sum_weight, new_img, x_pos, y_pos):
+        """Accumulate a translated tile with positive distance-to-edge weights.
+
+        Warp premultiplied intensities and weights together. This avoids dark
+        interpolation borders and keeps the result independent of tile order,
+        including at three-/four-tile junctions. Only a tile-sized ROI is warped.
         """
-        将 new_img 加权叠加到浮点画布上（原地修改 sum_img, sum_weight）。
+        h, w = new_img.shape
+        x0, y0 = int(np.floor(x_pos)), int(np.floor(y_pos))
+        x1, y1 = int(np.ceil(x_pos + w)), int(np.ceil(y_pos + h))
+        if x0 < 0 or y0 < 0 or x1 > sum_img.shape[1] or y1 > sum_img.shape[0]:
+            raise ValueError("Translated image falls outside the canvas")
 
-        sum_img:   累积加权像素 (float64)
-        sum_weight: 累积权重 (float64)
-        new_img:   新图像 (uint8)
-        x_pos, y_pos: new_img 在画布上的整数左上角坐标（必须 ≥ 0）
-        """
-        # 强制转为纯 Python int
-        h_new, w_new = new_img.shape
-        h_new = int(h_new)
-        w_new = int(w_new)
-        x_pos = int(x_pos)
-        y_pos = int(y_pos)
-        ch, cw = sum_img.shape
+        x_dist = np.minimum(np.arange(w) + 1, w - np.arange(w))
+        y_dist = np.minimum(np.arange(h) + 1, h - np.arange(h))
+        weights = np.minimum(y_dist[:, None], x_dist[None, :]).astype(np.float64)
+        weighted = new_img.astype(np.float64) * weights
+        fractional_x, fractional_y = x_pos - x0, y_pos - y0
+        if fractional_x != 0.0 or fractional_y != 0.0:
+            transform = np.array([[1, 0, fractional_x], [0, 1, fractional_y]], dtype=np.float64)
+            size = (x1 - x0, y1 - y0)
+            weighted = cv2.warpAffine(weighted, transform, size, flags=cv2.INTER_LINEAR,
+                                      borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            weights = cv2.warpAffine(weights, transform, size, flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        sum_img[y0:y1, x0:x1] += weighted
+        sum_weight[y0:y1, x0:x1] += weights
 
-        # ---- 计算重叠区域 ----
-        ox1 = max(x_pos, 0)
-        oy1 = max(y_pos, 0)
-        ox2 = min(x_pos + w_new, cw)
-        oy2 = min(y_pos + h_new, ch)
-        ow = ox2 - ox1
-        oh = oy2 - oy1
-
-        # ---- 创建新图的透明度掩码（线性羽化） ----
-        w_new_mask = np.ones((h_new, w_new), dtype=np.float64)
-
-        if ow > 0 and oh > 0:
-            o_n_x1 = ox1 - x_pos
-            o_n_y1 = oy1 - y_pos
-            o_c_x1 = ox1
-            o_c_y1 = oy1
-
-            # 确定画布内容的重心（用于判断画布在新图的哪一侧）
-            w_overlap = sum_weight[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow]
-            col_weights = w_overlap.sum(axis=0)  # 每列的权重和
-            row_weights = w_overlap.sum(axis=1)  # 每行的权重和
-
-            if ow <= oh:
-                # 水平融合
-                ramp = np.linspace(0, 1, ow, dtype=np.float64)[np.newaxis, :]
-                # 画布重心 X vs 新图重心 X
-                cols = np.arange(ox1, ox2)
-                total_w = col_weights.sum()
-                canvas_center_x = float(np.average(cols, weights=col_weights)) if total_w > 0 else ox1
-                new_center_x = x_pos + w_new / 2.0
-                # 画布在左 → 画布权重从左到右 1→0，新图权重 0→1
-                if canvas_center_x <= new_center_x:
-                    # 画布在左：画布权重从左到右 1→0，新图权重 0→1
-                    # ★ 同步缩放 sum_img 和 sum_weight，避免曝光异常
-                    sum_img[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= (1.0 - ramp)
-                    sum_weight[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= (1.0 - ramp)
-                    w_new_mask[o_n_y1:o_n_y1 + oh, o_n_x1:o_n_x1 + ow] = ramp
-                else:
-                    # 画布在右：画布权重从左到右 0→1，新图权重 1→0
-                    sum_img[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= ramp
-                    sum_weight[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= ramp
-                    w_new_mask[o_n_y1:o_n_y1 + oh, o_n_x1:o_n_x1 + ow] = 1.0 - ramp
-            else:
-                # 垂直融合
-                ramp = np.linspace(0, 1, oh, dtype=np.float64)[:, np.newaxis]
-                rows = np.arange(oy1, oy2)
-                total_w = row_weights.sum()
-                canvas_center_y = float(np.average(rows, weights=row_weights)) if total_w > 0 else oy1
-                new_center_y = y_pos + h_new / 2.0
-                if canvas_center_y <= new_center_y:
-                    # 画布在上：画布权重从上到下 1→0，新图权重 0→1
-                    sum_img[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= (1.0 - ramp)
-                    sum_weight[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= (1.0 - ramp)
-                    w_new_mask[o_n_y1:o_n_y1 + oh, o_n_x1:o_n_x1 + ow] = ramp
-                else:
-                    # 画布在下：画布权重从上到下 0→1，新图权重 1→0
-                    sum_img[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= ramp
-                    sum_weight[o_c_y1:o_c_y1 + oh, o_c_x1:o_c_x1 + ow] *= ramp
-                    w_new_mask[o_n_y1:o_n_y1 + oh, o_n_x1:o_n_x1 + ow] = 1.0 - ramp
-
-        # ---- 加权累加 ----
-        y1, y2 = int(y_pos), int(y_pos + h_new)
-        x1, x2 = int(x_pos), int(x_pos + w_new)
-        sum_img[y1:y2, x1:x2] += new_img.astype(np.float64) * w_new_mask
-        sum_weight[y1:y2, x1:x2] += w_new_mask
-
-        # ---- 汇报 ----
-        if ow > 0 and oh > 0:
-            # 只统计画布已有内容的实际重叠
-            w_actual = sum_weight[oy1:oy1 + oh, ox1:ox1 + ow]
-            actual_overlap_px = int((w_actual > 0).sum())
-            total_px = ow * oh
-            direction = "水平" if ow <= oh else "垂直"
-            self._log(f"  Blend overlap: {ow}x{oh} px ({direction}blend, "
-                  f"content={actual_overlap_px}/{total_px} px)")
+    def _compose_images(self, images, positions):
+        """Blend grayscale tiles once at their global floating-point positions."""
+        dtype = self._validate_images(images)
+        positions = np.asarray(positions, dtype=np.float64)
+        if positions.shape != (len(images), 2) or not np.isfinite(positions).all():
+            raise ValueError("Each image requires a finite (x, y) position")
+        # Remove only solver round-off, not real subpixel displacement.
+        rounded = np.rint(positions)
+        positions = np.where(np.abs(positions - rounded) < 1e-7, rounded, positions)
+        origin = np.floor(positions.min(axis=0))
+        positions = positions - origin
+        sizes = np.array([(image.shape[1], image.shape[0]) for image in images])
+        canvas_w, canvas_h = np.ceil((positions + sizes).max(axis=0)).astype(int)
+        self._log(f"  Canvas: {canvas_w} x {canvas_h}")
+        sum_img = np.zeros((canvas_h, canvas_w), dtype=np.float64)
+        sum_weight = np.zeros_like(sum_img)
+        for image, (x_pos, y_pos) in zip(images, positions):
+            self._blend_onto_canvas(sum_img, sum_weight, image, x_pos, y_pos)
+        np.divide(sum_img, sum_weight, out=sum_img, where=sum_weight > 0)
+        return np.clip(np.rint(sum_img), 0, np.iinfo(dtype).max).astype(dtype)
 
     # ================================================================
     # 配准图约束、全局定位与合成
@@ -700,8 +573,8 @@ class SEMStitcher:
             raise ValueError("At least two images are required for stitching")
         if not 0.0 <= min_axis_overlap_ratio <= 1.0:
             raise ValueError("min_axis_overlap_ratio must be between 0 and 1")
-        if residual_threshold <= 0:
-            raise ValueError("residual_threshold must be positive")
+        if not np.isfinite(residual_threshold) or residual_threshold <= 0:
+            raise ValueError("residual_threshold must be finite and positive")
 
         allowed_pairs = None
         if grid_shape is not None:
@@ -720,11 +593,13 @@ class SEMStitcher:
         # ---- Phase 1: load images ----
         images = []
         for path in image_paths:
-            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            img = cv2.imread(os.fspath(path), cv2.IMREAD_UNCHANGED)
             if img is None:
                 raise FileNotFoundError(f"Cannot read image: {path}")
             images.append(img)
             self._log(f"  Loaded: {os.path.basename(path)} ({img.shape[1]}x{img.shape[0]})")
+
+        self._validate_images(images)
 
         candidate_count = len(allowed_pairs) if allowed_pairs is not None else n * (n - 1) // 2
         self._log(f"\n--- Phase 1: Pairwise matching ({candidate_count} pairs) ---")
@@ -742,16 +617,16 @@ class SEMStitcher:
                     images[i], images[j], label_a=fname_i, label_b=fname_j
                 )
 
-                if dx is None or quality < 8:
+                if dx is None or dy is None or quality < 8 or not np.isfinite([dx, dy]).all():
                     self._log("  No match / no overlap")
                     continue
 
                 overlap_w, overlap_h, axis_ratio = self._overlap_geometry(
                     images[i], images[j], dx, dy
                 )
-                if axis_ratio < min_axis_overlap_ratio:
+                if overlap_w <= 0 or overlap_h <= 0 or axis_ratio < min_axis_overlap_ratio:
                     self._log(
-                        f"  Reject corner-only overlap: {overlap_w:.0f}x{overlap_h:.0f} px, "
+                        f"  Reject insufficient overlap: {overlap_w:.0f}x{overlap_h:.0f} px, "
                         f"axis ratio={axis_ratio:.2f} < {min_axis_overlap_ratio:.2f}"
                     )
                     continue
@@ -822,44 +697,25 @@ class SEMStitcher:
                     )
             edges = retained_edges
 
+        if worst_residual > residual_threshold:
+            raise RuntimeError(
+                f"Inconsistent image matches: worst residual {worst_residual:.2f} px "
+                f"exceeds {residual_threshold:.2f} px. Check overlap, scan order, "
+                "and grid settings before exporting a panorama."
+            )
+
         residual_x_text = f"X residual={residual_x[0]:.1f}" if len(residual_x) > 0 else "X determined"
         residual_y_text = f"Y residual={residual_y[0]:.1f}" if len(residual_y) > 0 else "Y determined"
         self._log(f"  {residual_x_text}, {residual_y_text} (rank X={rank_x}, Y={rank_y})")
         for index in range(n):
             self._log(
                 f"  [{index}] {os.path.basename(image_paths[index])}: "
-                f"({global_x[index]:.1f}, {global_y[index]:.1f})"
+                f"({global_x[index]:.3f}, {global_y[index]:.3f})"
             )
 
-        # ---- Phase 3: pre-allocate canvas and blend in graph order ----
-        self._log("\n--- Phase 3: Blend composition ---")
-        all_left, all_top, all_right, all_bottom = [], [], [], []
-        for index, (gx, gy) in enumerate(zip(global_x, global_y)):
-            height, width = images[index].shape
-            all_left.append(gx)
-            all_top.append(gy)
-            all_right.append(gx + width)
-            all_bottom.append(gy + height)
-
-        canvas_x_min = int(np.floor(min(all_left)))
-        canvas_y_min = int(np.floor(min(all_top)))
-        canvas_w = int(np.ceil(max(all_right) - canvas_x_min))
-        canvas_h = int(np.ceil(max(all_bottom) - canvas_y_min))
-        self._log(f"  Canvas: {canvas_w} x {canvas_h}")
-
-        sum_img = np.zeros((canvas_h, canvas_w), dtype=np.float64)
-        sum_weight = np.zeros((canvas_h, canvas_w), dtype=np.float64)
-        order = self._connected_order(n, edges, root)
-        for index in order:
-            fname = os.path.basename(image_paths[index])
-            x_pos = int(round(global_x[index])) - canvas_x_min
-            y_pos = int(round(global_y[index])) - canvas_y_min
-            self._log(f"\n  Add [{index}] {fname} at ({x_pos}, {y_pos})")
-            self._blend_onto_canvas(sum_img, sum_weight, images[index], x_pos, y_pos)
-
-        valid = sum_weight > 1e-6
-        sum_img[valid] /= sum_weight[valid]
-        result = np.clip(np.round(sum_img), 0, 255).astype(np.uint8)
+        # Each image is resampled once, directly into global coordinates.
+        self._log("\n--- Phase 3: Subpixel feather composition ---")
+        result = self._compose_images(images, list(zip(global_x, global_y)))
 
         self._log(f"\n{'=' * 60}")
         self._log(f"All {n} images stitched!")
@@ -924,8 +780,8 @@ if __name__ == "__main__":
         )
     if not 0.0 <= args.min_axis_overlap <= 1.0:
         parser.error("--min-axis-overlap must be between 0 and 1")
-    if args.residual_threshold <= 0:
-        parser.error("--residual-threshold must be positive")
+    if not np.isfinite(args.residual_threshold) or args.residual_threshold <= 0:
+        parser.error("--residual-threshold must be finite and positive")
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     output_path = os.path.join(base_dir, "stitched_panorama.tif")

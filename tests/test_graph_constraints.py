@@ -36,5 +36,39 @@ class GridConstraintTests(unittest.TestCase):
         self.assertEqual(SEMStitcher._connected_order(4, edges, root=0), [0, 1, 2])
 
 
+class GraphPipelineTests(unittest.TestCase):
+    def setUp(self):
+        self.stitcher = SEMStitcher()
+        self.stitcher.set_progress_callback(lambda message: None)
+
+    def run_matches(self, count, matches, **kwargs):
+        from unittest.mock import patch
+        image = np.ones((100, 100), np.uint8)
+        with patch('main.cv2.imread', return_value=image), \
+             patch.object(self.stitcher, '_try_match_pair', side_effect=matches):
+            return self.stitcher.stitch_sequence([f'{i}.tif' for i in range(count)], **kwargs)
+
+    def test_zero_area_overlap_is_rejected_even_with_one_full_axis(self):
+        with self.assertRaisesRegex(RuntimeError, 'reliable edges'):
+            self.run_matches(2, [(200, 0, 20)], min_axis_overlap_ratio=0)
+
+    def test_enough_edges_do_not_imply_a_connected_graph(self):
+        fail = (None, None, 0)
+        with self.assertRaisesRegex(RuntimeError, 'Missing: 3.tif'):
+            self.run_matches(4, [(-10, 0, 20), (-20, 0, 20), fail,
+                                 (-10, 0, 20), fail, fail])
+
+    def test_inconsistent_loop_cannot_silently_produce_a_panorama(self):
+        with self.assertRaisesRegex(RuntimeError, 'Inconsistent image matches'):
+            self.run_matches(3, [(-20, 0, 20), (-70, 0, 20), (-20, 0, 20)], residual_threshold=5)
+
+    def test_consistent_fractional_constraints_recover_positions(self):
+        positions = [(0, 0), (20.25, 0.5), (0.75, 30.375), (21, 30.875)]
+        edges = [(20, i, j, positions[i][0] - positions[j][0], positions[i][1] - positions[j][1])
+                 for i in range(4) for j in range(i + 1, 4)]
+        x, y, *rest = self.stitcher._solve_global_positions(4, edges, 0)
+        np.testing.assert_allclose(np.column_stack([x, y]), positions, atol=1e-8)
+
+
 if __name__ == "__main__":
     unittest.main()

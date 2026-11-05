@@ -458,10 +458,11 @@ class SEMStitcherGUI(ctk.CTk):
     def _update_preview(self):
         if self.stitched_result is None:
             return
-        img_arr = self.stitched_result
+        # Normalize only the display copy; keep the full 16-bit result for export.
+        img_arr = SEMStitcher._matching_image(self.stitched_result)
         h, w = img_arr.shape
         scale = min(PREVIEW_MAX / max(w, h), 1.0)
-        new_w, new_h = int(w * scale), int(h * scale)
+        new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
         from cv2 import resize, INTER_AREA
         resized = resize(img_arr, (new_w, new_h), interpolation=INTER_AREA)
         pil_img = Image.fromarray(resized)
@@ -490,7 +491,17 @@ class SEMStitcherGUI(ctk.CTk):
         if not path:
             return
         from cv2 import imwrite
-        imwrite(path, self.stitched_result)
+        try:
+            if (self.stitched_result.dtype == np.uint16
+                    and os.path.splitext(path)[1].lower() not in (".tif", ".tiff", ".png")):
+                raise ValueError("16-bit images must be exported as TIFF or PNG")
+            if not imwrite(path, self.stitched_result):
+                raise OSError(f"Cannot write image: {path}")
+        except Exception as error:
+            message = self.t("log_error", e=error)
+            self._append_log(message)
+            messagebox.showerror(self.t("dialog_export"), message)
+            return
         messagebox.showinfo(
             self.t("msg_export_ok"),
             self.t("msg_export_detail", path=path),
