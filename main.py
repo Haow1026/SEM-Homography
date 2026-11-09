@@ -15,6 +15,7 @@ import os
 import time
 
 from inspection import PairDiagnostic, StitchInspection, canvas_geometry, file_signature
+from stitching_progress import StageProgress
 from image_io import read_image, write_image
 
 
@@ -72,6 +73,7 @@ class SEMStitcher:
 
         # ---- GUI 回调 ----
         self._progress_callback = None
+        self._stage_callback = None
         self._cancel_callback = None
         self._feature_cache = None
         self._measure_features = False
@@ -89,6 +91,15 @@ class SEMStitcher:
     def set_progress_callback(self, callback):
         """设置进度回调函数 callback(msg: str)，供 GUI 实时显示日志"""
         self._progress_callback = callback
+
+    def set_stage_callback(self, callback):
+        """Receive StageProgress after actual work units; independent of logs."""
+        self._stage_callback = callback
+
+    def _stage(self, stage, completed=0, total=None):
+        self._check_cancelled()
+        if self._stage_callback is not None:
+            self._stage_callback(StageProgress(stage, completed, total))
 
     def _log(self, msg: str):
         """统一日志输出：有回调则发给 GUI，否则 print"""
@@ -490,6 +501,8 @@ class SEMStitcher:
                                  blend_accumulator_bytes=sum_buffer.nbytes + weight_buffer.nbytes,
                                  output_bytes=result.nbytes)
         self._log(f"  Blend in blocks of up to {block_size} x {block_size} pixels")
+        total_blocks = ((canvas_w + block_size - 1) // block_size) * ((canvas_h + block_size - 1) // block_size)
+        self._stage('blend', 0, total_blocks)
         for top in range(0, canvas_h, block_size):
             bottom = min(top + block_size, canvas_h)
             row_tiles = [i for i, (_, y0, _, y1) in enumerate(bounds) if y0 < bottom and y1 > top]
@@ -512,6 +525,7 @@ class SEMStitcher:
                 result[top:bottom, left:right] = sum_img
                 blocks += 1
                 self.last_metrics['blend_blocks'] = blocks
+                self._stage('blend', blocks, total_blocks)
         self._check_cancelled()
         return result
 
@@ -781,6 +795,7 @@ class SEMStitcher:
         # ---- Phase 1: load images ----
         phase_started = time.perf_counter()
         images, signatures = [], []
+        self._stage('load', 0, n)
         for path in image_paths:
             self._check_cancelled()
             img = read_image(path)
@@ -788,6 +803,7 @@ class SEMStitcher:
                 raise FileNotFoundError(f"Cannot read image: {path}")
             images.append(img)
             signatures.append(file_signature(path))
+            self._stage('load', len(images), n)
             self._log(f"  Loaded: {os.path.basename(path)} ({img.shape[1]}x{img.shape[0]})")
 
         self._validate_images(images)
@@ -797,6 +813,8 @@ class SEMStitcher:
         candidate_count = len(allowed_pairs) if allowed_pairs is not None else n * (n - 1) // 2
         self._log(f"\n--- Phase 1: Pairwise matching ({candidate_count} pairs) ---")
         edges = []  # (quality, i, j, dx, dy), where img_i is shifted by (dx, dy) into img_j.
+        matched = 0
+        self._stage('match', 0, candidate_count)
 
         for i in range(n):
             for j in range(i + 1, n):
@@ -809,6 +827,8 @@ class SEMStitcher:
                 dx, dy, quality = self._try_match_pair(
                     images[i], images[j], label_a=fname_i, label_b=fname_j
                 )
+                matched += 1
+                self._stage('match', matched, candidate_count)
 
                 if dx is None or dy is None or quality < 8 or not np.isfinite([dx, dy]).all():
                     self._log("  No match / no overlap")
@@ -843,6 +863,7 @@ class SEMStitcher:
         self.last_metrics['match_seconds'] = time.perf_counter() - phase_started
         phase_started = time.perf_counter()
         measured_edges = edges[:]
+        self._stage('solve')
 
         root, degree = self._select_anchor(n, edges)
         order = self._connected_order(n, edges, root)
@@ -867,6 +888,7 @@ class SEMStitcher:
             rank_x, rank_y, matrix_shape,
         ) = solution
         self.last_metrics['solve_seconds'] = time.perf_counter() - phase_started
+        self._stage('solve', 1, 1)
 
         residual_x_text = f"X residual={residual_x[0]:.1f}" if len(residual_x) > 0 else "X determined"
         residual_y_text = f"Y residual={residual_y[0]:.1f}" if len(residual_y) > 0 else "Y determined"

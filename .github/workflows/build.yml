@@ -1,40 +1,48 @@
-name: Build Windows EXE
+name: Build desktop packages
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: windows-latest
-
+    name: Package ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-arm64
+            os: macos-15
+            arch: arm64
+          - target: macos-intel
+            os: macos-15-intel
+            arch: x64
+          - target: windows-x64
+            os: windows-latest
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Install dependencies
+          python-version: '3.11'
+          architecture: ${{ matrix.arch }}
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install build dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install opencv-contrib-python numpy customtkinter pillow
-          pip install pyinstaller
-
-      - name: Build EXE with PyInstaller
-        run: |
-          pyinstaller `
-            --onefile `
-            --windowed `
-            --name SEM_Stitcher `
-            --add-data "main.py;." `
-            gui.py
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          python -m pip install --only-binary=:all: -r requirements-build.txt
+      - name: Build and verify extracted standalone app
+        run: python tools/package_desktop.py --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
         with:
-          name: SEM_Stitcher_Windows
-          path: dist/SEM_Stitcher.exe
+          name: SEM-Stitcher-${{ matrix.target }}
+          path: packages/SEM-Stitcher-*
+          compression-level: 0
+          if-no-files-found: error
