@@ -3,6 +3,7 @@
 BACKGROUND = ('#f3f5f7', '#14181e')
 SURFACE = ('#ffffff', '#1d232c')
 SUBTLE = ('#edf1f5', '#28313c')
+SELECTION = ('#cee2fc', '#354f70')
 BORDER = ('#d6dee8', '#354150')
 TEXT = ('#202d3b', '#e5ebf2')
 MUTED = ('#53657a', '#a6b4c6')

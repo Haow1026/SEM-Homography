@@ -10,6 +10,7 @@ import numpy as np
 
 from inspection import Viewport, display_gray, display_range, pair_frame, sample_view
 import ui_theme as theme
+from workbench import button_style
 
 
 TEXT = {
@@ -70,24 +71,34 @@ class SeamInspector(ctk.CTkFrame):
         self.viewport = Viewport((panorama.shape[1], panorama.shape[0]))
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(4, weight=1)
-        self.pair_menu = ctk.CTkOptionMenu(self, values=[''], command=self._choose_label, width=340)
+        self.pair_menu = ctk.CTkOptionMenu(self, values=[''], command=self._choose_label, width=340,
+                                          fg_color=theme.SUBTLE, button_color=theme.SUBTLE,
+                                          button_hover_color=theme.BORDER, text_color=theme.TEXT,
+                                          dropdown_fg_color=theme.SURFACE, dropdown_text_color=theme.TEXT,
+                                          dropdown_hover_color=theme.SUBTLE)
         self.pair_menu.grid(row=0, column=0, sticky='ew', padx=4, pady=(0, 6))
         tools = ctk.CTkFrame(self, fg_color='transparent')
         tools.grid(row=2, column=0, sticky='ew', padx=4, pady=6)
         self.mode_button = ctk.CTkSegmentedButton(self, values=['A', 'B'], command=self._choose_mode,
-                                                font=ctk.CTkFont(size=12))
+                                                font=ctk.CTkFont(size=12), fg_color=theme.BORDER,
+                                                selected_color=theme.SELECTION, selected_hover_color=theme.SELECTION,
+                                                unselected_color=theme.SUBTLE, unselected_hover_color=theme.BORDER,
+                                                text_color=theme.TEXT)
         self.mode_button.grid(row=1, column=0, sticky='w', padx=4)
-        self.fit_button = ctk.CTkButton(tools, text='', width=85, command=self.fit)
+        self.fit_button = ctk.CTkButton(tools, text='', width=85, command=self.fit, **button_style())
         self.fit_button.pack(side='left', padx=(0, 5))
-        self.actual_button = ctk.CTkButton(tools, text='100%', width=65, command=lambda: self.zoom(1.0))
+        self.actual_button = ctk.CTkButton(tools, text='100%', width=65, command=lambda: self.zoom(1.0), **button_style())
         self.actual_button.pack(side='left', padx=(0, 5))
         for label, factor in (('−', 0.8), ('+', 1.25)):
-            ctk.CTkButton(tools, text=label, width=35, command=lambda f=factor: self.zoom(self.viewport.zoom * f)).pack(side='left', padx=(0, 4))
-        self.zoom_label = ctk.CTkLabel(tools, text='')
+            ctk.CTkButton(tools, text=label, width=35, command=lambda f=factor: self.zoom(self.viewport.zoom * f),
+                           **button_style()).pack(side='left', padx=(0, 4))
+        self.zoom_label = ctk.CTkLabel(tools, text='', text_color=theme.TEXT)
         self.zoom_label.pack(side='left', padx=5)
         self.show_bounds = tk.BooleanVar(self, value=True)
         self.bounds_button = ctk.CTkCheckBox(tools, text='', variable=self.show_bounds, command=self._request_render,
-                                            font=ctk.CTkFont(size=11), checkbox_width=16, checkbox_height=16)
+                                            font=ctk.CTkFont(size=11), checkbox_width=16, checkbox_height=16,
+                                            text_color=theme.TEXT, fg_color=theme.PRIMARY,
+                                            checkmark_color=theme.PRIMARY_TEXT, border_color=theme.BORDER)
         self.bounds_button.pack(side='left', padx=8)
         self.info_label = ctk.CTkLabel(self, text='', width=1, anchor='w', justify='left', wraplength=560,
                                       font=ctk.CTkFont(size=12))
