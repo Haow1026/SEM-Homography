@@ -1,0 +1,6 @@
+# Desktop bundles use Tk for the GUI; OpenCV does not need its own GUI toolkit.
+customtkinter==6.0.0
+numpy==2.4.4
+opencv-contrib-python-headless==4.13.0.92
+pillow==12.2.0
+pyinstaller==6.22.3

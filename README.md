@@ -1,8 +1,8 @@
 # SEM 图像拼接工具 (SEM Image Stitching Tool)
 
-Mac 桌面应用，用于拼接扫描电子显微镜 (SEM) 图像。纯平移对齐（2 DOF），支持 3×3 网格、蛇形扫描与自动匹配。输入为位深一致的 8 位或 16 位灰度图像。
+macOS 和 Windows 桌面应用，用于拼接扫描电子显微镜 (SEM) 图像。纯平移对齐（2 DOF），支持 3×3 网格、蛇形扫描与自动匹配。输入为位深一致的 8 位或 16 位灰度图像。
 
-A Mac desktop app for stitching Scanning Electron Microscope (SEM) images. Pure translation alignment (2 DOF), supports 3×3 grids, serpentine scans, and arbitrary topologies.
+A macOS and Windows desktop app for stitching Scanning Electron Microscope (SEM) images. Pure translation alignment (2 DOF), supports 3×3 grids, serpentine scans, and arbitrary topologies.
 
 ---
 
@@ -26,6 +26,10 @@ A Mac desktop app for stitching Scanning Electron Microscope (SEM) images. Pure 
 ---
 
 ## 安装  Installation
+
+从 [桌面版构建](https://github.com/Haow1026/SEM-Homography/actions/workflows/build.yml?query=branch%3Amain) 的 Artifacts 下载 Apple Silicon、Intel Mac 或 Windows x64 包。解压后直接启动，无需安装 Python。见 [桌面版启动说明](docs/desktop-packages.md)。
+
+从源代码运行：
 
 ```bash
 # 依赖
@@ -206,6 +210,17 @@ xvfb-run -a -s "-screen 0 1600x1200x24" python3 tools/preview_workbench.py --out
 这组图像用于界面检查，不代表真实 SEM 对齐效果。
 Linux Python 3.13 的 CI 会上传 `workbench-ui-previews` 截图附件，供界面审查。
 
+### 打包桌面版
+
+在目标系统和架构上，使用带 Tk 的 Python 3.11，在独立虚拟环境中执行：
+
+```bash
+python -m pip install --only-binary=:all: -r requirements-build.txt
+python tools/package_desktop.py --target macos-arm64
+```
+
+Intel Mac 使用 `macos-intel`，Windows x64 使用 `windows-x64`。打包脚本解压实际 ZIP，启动其中的应用并进行拼接、接缝和 16 位 TIFF 往返检查，再输出包、校验值和验证记录到 `packages/`。GitHub Actions 在三种原生架构上运行同一脚本。
+
 ---
 
 ## 算法流程  Algorithm
@@ -245,7 +260,7 @@ SEM Homography/
 ├── tools/               # 可复现性能基准与原生界面预览脚本
 ├── benchmarks/          # 合成基准测量结果
 ├── tests/               # 合成数据回归测试
-├── .github/workflows/   # 测试及 Windows 打包
+├── .github/workflows/   # 测试及 macOS / Windows 打包
 ├── .gitignore           
 └── README.md
 ```
