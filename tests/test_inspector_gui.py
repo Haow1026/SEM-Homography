@@ -24,6 +24,7 @@ class InspectorGUITests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.app = SEMStitcherGUI()
+        self.addCleanup(lambda: None if self.app._closing else self.app._on_close())
         self.app.withdraw()
         self.errors = []
         self.app.report_callback_exception = lambda kind, error, trace: self.errors.append(str(error))
@@ -44,6 +45,8 @@ class InspectorGUITests(unittest.TestCase):
         self.app._render_state()
         self.app._on_inspect()
         self.viewer = self.app._inspector
+        self.app.deiconify()
+        self.app.geometry('1050x700')
         self.wait(lambda: self.viewer._photo is not None and self.viewer._render_id is None)
 
     def tearDown(self):
@@ -146,7 +149,8 @@ class InspectorGUITests(unittest.TestCase):
 
     def test_minimum_window_controls_fit_in_all_languages(self):
         self.choose(1)
-        self.viewer.geometry('880x600')
+        self.app.geometry('1050x700')
+        self.app._set_log_open(True)
         for language in ('en', 'zh-Hans', 'ja'):
             self.viewer.set_language(language)
             self.app.update()
@@ -158,6 +162,80 @@ class InspectorGUITests(unittest.TestCase):
                                          self.viewer.winfo_rootx() + self.viewer.winfo_width())
                     self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(),
                                          self.viewer.winfo_rooty() + self.viewer.winfo_height())
+
+    def test_embedded_panel_can_return_without_losing_pair_view_or_result(self):
+        self.choose(0)
+        self.viewer.set_mode('alternate')
+        self.assertIs(self.viewer.winfo_toplevel(), self.app)
+        self.assertTrue(self.app._inspection_visible)
+        images = self.viewer._images
+        origin = self.viewer.viewport.origin.copy()
+        self.app.btn_inspect.invoke()
+        self.assertFalse(self.app._inspection_visible)
+        self.assertFalse(self.viewer.active)
+        self.assertIsNone(self.viewer._blink_id)
+        self.assertIsNone(self.viewer._render_id)
+        self.assertIs(self.viewer._images, images)
+        self.assertIs(self.app.stitched_result, self.panorama)
+        self.app.btn_inspect.invoke()
+        self.app.update()
+        self.assertTrue(self.viewer.active)
+        self.assertIs(self.app._inspector, self.viewer)
+        np.testing.assert_array_equal(self.viewer.viewport.origin, origin)
+        self.assertIsNotNone(self.viewer._blink_id)
+
+    def test_side_by_side_shares_pixel_coordinates_and_keeps_five_pixel_gap(self):
+        self.choose(0)
+        before = self.panorama.copy()
+        self.viewer.set_mode('side')
+        self.viewer.show_bounds.set(False)
+        self.viewer.viewport.center((520, 260), zoom=1.0)
+        self.wait(lambda: self.viewer._render_id is None)
+        from PIL import ImageTk
+        from inspection import pair_frame
+        shown = np.asarray(ImageTk.getimage(self.viewer._photo).convert('RGB'))
+        width = self.viewer.viewport.view_size[0]
+        expected = pair_frame(self.viewer._images, [(0, 0), (400, 0)], self.viewer.viewport, 'a', self.viewer._limits)
+        np.testing.assert_array_equal(shown[30:, :width], expected[30:])
+        expected = pair_frame(self.viewer._images, [(0, 0), (400, 0)], self.viewer.viewport, 'b', self.viewer._limits)
+        np.testing.assert_array_equal(shown[30:, width+5:width*2+5], expected[30:])
+        gap = np.tile(np.array([37, 42, 49], np.uint8), (shown.shape[0], 5, 1))
+        np.testing.assert_array_equal(shown[:, width:width+5], gap)
+        # Wheel zoom in the right pane must anchor the same source coordinate.
+        world = self.viewer.viewport.origin + [60, 80]
+        self.viewer._wheel(SimpleNamespace(x=width+5+60, y=80, delta=120))
+        self.assertEqual(self.viewer.viewport.zoom, 1.25)
+        np.testing.assert_allclose(self.viewer.viewport.origin + np.array([60, 80])/1.25, world)
+        np.testing.assert_array_equal(self.panorama, before)
+
+    def test_hidden_panel_finishes_source_loading_without_rendering_or_blinking(self):
+        import threading
+        entered, release = threading.Event(), threading.Event()
+        load = StitchInspection.load_pair
+
+        def blocked(report, index):
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError('loader timeout')
+            return load(report, index)
+
+        with patch.object(StitchInspection, 'load_pair', blocked):
+            self.viewer.select_pair(0)
+            self.assertTrue(entered.wait(2))
+            try:
+                self.app.btn_inspect.invoke()
+                release.set()
+                self.wait(lambda: not self.viewer._loading)
+                self.assertIsNone(self.viewer._render_id)
+                self.assertIsNone(self.viewer._blink_id)
+                self.assertFalse(self.app._inspection_visible)
+                self.assertIs(self.app.stitched_result, self.panorama)
+            finally:
+                release.set()
+                self.viewer._loader.join(3)
+        self.app.btn_inspect.invoke()
+        self.wait(lambda: self.viewer._render_id is None)
+        self.assertIsNotNone(self.viewer._photo)
 
 
 if __name__ == '__main__':

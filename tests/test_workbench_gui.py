@@ -3,6 +3,7 @@ import os
 import sys
 import unittest
 from unittest.mock import patch
+from stitching_progress import StageProgress
 
 import numpy as np
 
@@ -189,6 +190,21 @@ class WorkbenchTests(unittest.TestCase):
             self.assertIs(self.app.stitched_result, source)
         finally:
             ctk.set_widget_scaling(1.0)
+
+    def test_stage_counts_drive_progress_without_claiming_an_overall_percentage(self):
+        self.app.task.state = TaskState.RUNNING
+        self.app.task.progress = StageProgress('match', 4, 12)
+        self.app._render_state()
+        self.assertEqual(self.app.progress_bar.cget('mode'), 'determinate')
+        self.assertAlmostEqual(self.app.progress_bar.get(), 4/12)
+        self.assertIn('4/12', self.app.lbl_progress.cget('text'))
+        self.app.task.progress = StageProgress('solve')
+        self.app._refresh_progress()
+        self.assertEqual(self.app.progress_bar.cget('mode'), 'indeterminate')
+        self.app.task.state = TaskState.CANCELLED
+        self.app._render_state()
+        self.assertEqual(self.app.progress_bar.get(), 0)
+        self.assertEqual(self.app.lbl_progress.cget('text'), '')
 
 
 if __name__ == '__main__':

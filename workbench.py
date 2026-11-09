@@ -172,7 +172,8 @@ def build_workbench(app):
     preview_tools = ctk.CTkFrame(app.workspace, fg_color='transparent')
     preview_tools.grid(row=0, column=0, sticky='ew', padx=12, pady=8)
     preview_tools.grid_columnconfigure(0, weight=1)
-    label(preview_tools, 'preview_title').grid(row=0, column=0, sticky='w')
+    app.lbl_workspace = label(preview_tools, 'preview_title')
+    app.lbl_workspace.grid(row=0, column=0, sticky='w')
     app.btn_inspect = button(preview_tools, 'btn_inspect', app._on_inspect, width=166)
     app.btn_inspect.grid(row=0, column=1, sticky='e')
     # A real placeholder keeps Tk from referencing a released PhotoImage.
@@ -182,7 +183,11 @@ def build_workbench(app):
                                     font=app._font_body, corner_radius=6)
     app.preview_label.grid(row=1, column=0, sticky='nsew', padx=12, pady=(0, 8))
     app.preview_label.bind('<Configure>', app._on_preview_resize)
-    label(app.workspace, 'fit_hint', small=True).grid(row=2, column=0, sticky='w', padx=12, pady=(0, 6))
+    app.lbl_fit_hint = label(app.workspace, 'fit_hint', small=True)
+    app.lbl_fit_hint.grid(row=2, column=0, sticky='w', padx=12, pady=(0, 6))
+    app.inspection_host = ctk.CTkFrame(app.workspace, fg_color='transparent')
+    app.inspection_host.grid_columnconfigure(0, weight=1)
+    app.inspection_host.grid_rowconfigure(0, weight=1)
 
     app.log_panel = ctk.CTkFrame(app, fg_color=theme.SURFACE, corner_radius=8,
                                 border_width=1, border_color=theme.BORDER)
@@ -203,9 +208,11 @@ def build_workbench(app):
                                  font=app._font_small)
     app.lbl_status.grid(row=0, column=0, sticky='ew')
     app.lbl_size = ctk.CTkLabel(footer, text='', text_color=theme.MUTED, font=app._font_small)
-    app.lbl_size.grid(row=0, column=1, sticky='e', padx=(12, 0))
+    app.lbl_size.grid(row=0, column=2, sticky='e', padx=(12, 0))
+    app.lbl_progress = ctk.CTkLabel(footer, text='', text_color=theme.MUTED, font=app._font_small)
+    app.lbl_progress.grid(row=0, column=1, sticky='e', padx=(12, 0))
     app.progress_bar = ctk.CTkProgressBar(footer, mode='indeterminate', height=4,
                                         fg_color=theme.BORDER, progress_color=theme.PRIMARY)
-    app.progress_bar.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(3, 0))
+    app.progress_bar.grid(row=1, column=0, columnspan=3, sticky='ew', pady=(3, 0))
     app.progress_bar.set(0)
     app._sync_native_palette(ctk.get_appearance_mode())

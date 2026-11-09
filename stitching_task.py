@@ -80,6 +80,7 @@ class StitchTask:
         self.result = None
         self.inspection = None
         self.metrics = {}
+        self.progress = None
         self.error = None
         self.request = None
         self.thread = None
@@ -98,6 +99,7 @@ class StitchTask:
         self.result = self.error = self.request = None
         self.inspection = None
         self.metrics = {}
+        self.progress = None
         self.state = TaskState.READY if has_inputs else TaskState.IDLE
 
     def start(self, request):
@@ -107,6 +109,7 @@ class StitchTask:
         self.result = self.error = self._terminal = None
         self.inspection = None
         self.metrics = {}
+        self.progress = None
         self._events = queue.Queue()
         self._cancel = threading.Event()
         self.state = TaskState.RUNNING
@@ -128,6 +131,8 @@ class StitchTask:
             stitcher = self._factory()
             stitcher.set_cancel_callback(self._cancel.is_set)
             stitcher.set_progress_callback(lambda message: self._events.put(('log', message)))
+            if hasattr(stitcher, 'set_stage_callback'):
+                stitcher.set_stage_callback(lambda progress: self._events.put(('progress', progress)))
             paths, options = request.algorithm_inputs()
             result = stitcher.stitch_sequence(paths, **options)
             inspection = getattr(stitcher, 'last_inspection', None)
@@ -150,6 +155,8 @@ class StitchTask:
                 break
             if kind == 'log':
                 logs.append(payload)
+            elif kind == 'progress':
+                self.progress = payload
             else:
                 self._terminal = (kind, payload)
         if self.busy and self._terminal is not None and not self.thread.is_alive():

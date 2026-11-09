@@ -218,6 +218,10 @@ LANG['en'].update({
     'project_untitled': 'Untitled project', 'project_modified': 'Modified',
     'fit_hint': 'Fit to window', 'lbl_size_depth': '{w} × {h} · {bits}-bit',
     'order_hint': 'Files are listed in acquisition order.', 'layout_hint': 'Numbers = file list order.',
+    'btn_back': 'Back to panorama', 'inspection_title': 'Seam inspection',
+    'stage_load': 'Loading images', 'stage_match': 'Matching pairs',
+    'stage_solve': 'Global positioning', 'stage_blend': 'Blending blocks',
+    'stage_count': '{stage} · {done}/{total}',
 })
 LANG['zh-Hans'].update({
     'heading': 'SEM 图像拼接', 'btn_start': '开始拼接', 'btn_restart': '重新拼接',
@@ -227,6 +231,10 @@ LANG['zh-Hans'].update({
     'project_untitled': '未命名项目', 'project_modified': '已修改',
     'fit_hint': '自动适应窗口', 'lbl_size_depth': '{w} × {h} · {bits} 位',
     'order_hint': '文件按采集顺序排列。', 'layout_hint': '编号对应文件列表顺序。',
+    'btn_back': '返回全景预览', 'inspection_title': '接缝检查',
+    'stage_load': '读取图像', 'stage_match': '匹配图像对',
+    'stage_solve': '全局定位', 'stage_blend': '融合图块',
+    'stage_count': '{stage} · {done}/{total}',
 })
 LANG['ja'].update({
     'title': 'SEM 画像ステッチ', 'heading': 'SEM 画像ステッチ',
@@ -236,6 +244,10 @@ LANG['ja'].update({
     'project_untitled': '名称未設定', 'project_modified': '変更あり',
     'fit_hint': 'ウィンドウに合わせる', 'lbl_size_depth': '{w} × {h} · {bits} ビット',
     'order_hint': 'ファイルは取得順に表示します。', 'layout_hint': '番号はファイル一覧の順序です。',
+    'btn_back': '全景に戻る', 'inspection_title': '継ぎ目を確認',
+    'stage_load': '画像を読込', 'stage_match': 'ペアを照合',
+    'stage_solve': '全体位置を計算', 'stage_blend': 'ブロックを合成',
+    'stage_count': '{stage} · {done}/{total}',
 })
 
 # ============================================================
@@ -283,6 +295,7 @@ class SEMStitcherGUI(ctk.CTk):
         self._poll_id = None
         self._preview_id = None
         self._inspector = None
+        self._inspection_visible = False
         self._layout_valid = False
         self._layout_notice = False
         self._i18n_widgets = {}
@@ -329,6 +342,7 @@ class SEMStitcherGUI(ctk.CTk):
         self._render_state()
         if self._inspector is not None and not self._inspector.closed:
             self._inspector.set_language(self.lang)
+        self._refresh_workspace_labels()
         if self.stitched_result is None:
             self.preview_label.configure(text=self.t('preview_placeholder'))
         else:
@@ -471,9 +485,7 @@ class SEMStitcherGUI(ctk.CTk):
         for widget in (self.rows_entry, self.cols_entry, self.check_serpentine, self.check_rtl):
             widget.configure(state=grid_state)
         succeeded = self.task.state == TaskState.SUCCEEDED
-        self.progress_bar.configure(mode='indeterminate' if busy else 'determinate')
-        if not busy:
-            self.progress_bar.set(1 if succeeded else 0)
+        self._refresh_progress()
         self.btn_start.configure(state='normal' if self._layout_valid and not busy else 'disabled',
                                  text=self.t('btn_start_disabled' if self.task.busy else
                                              'btn_restart' if succeeded else 'btn_start'),
@@ -498,10 +510,46 @@ class SEMStitcherGUI(ctk.CTk):
                       else 'status_' + state.value)
         self.lbl_status.configure(text=self.t(status_key), text_color=color)
 
+    def _refresh_progress(self):
+        progress = self.task.progress if self.task.busy and not self.project_job.busy else None
+        fraction = progress.fraction if progress is not None else None
+        determinate = not self._busy or fraction is not None
+        self.progress_bar.configure(mode='determinate' if determinate else 'indeterminate')
+        if determinate:
+            self.progress_bar.stop()
+            self.progress_bar.set(fraction if self._busy else int(self.task.state == TaskState.SUCCEEDED))
+        else:
+            self.progress_bar.start()
+        text = ''
+        if progress is not None:
+            text = self.t('stage_' + progress.stage)
+            if progress.total is not None:
+                text = self.t('stage_count', stage=text, done=progress.completed, total=progress.total)
+        self.lbl_progress.configure(text=text)
+
+    def _refresh_workspace_labels(self):
+        self.lbl_workspace.configure(text=self.t('inspection_title' if self._inspection_visible else 'preview_title'))
+        self.btn_inspect.configure(text=self.t('btn_back' if self._inspection_visible else 'btn_inspect'))
+
+    def _show_inspection(self, visible):
+        self._inspection_visible = visible
+        if visible:
+            self.preview_label.grid_remove()
+            self.lbl_fit_hint.grid_remove()
+            self.inspection_host.grid(row=1, column=0, rowspan=2, sticky='nsew', padx=8, pady=(0, 8))
+        else:
+            self.inspection_host.grid_remove()
+            self.preview_label.grid()
+            self.lbl_fit_hint.grid()
+        if self._inspector is not None and not self._inspector.closed:
+            self._inspector.set_active(visible)
+        self._refresh_workspace_labels()
+
     def _clear_preview(self):
         if self._inspector is not None:
             self._inspector.close()
             self._inspector = None
+        self._show_inspection(False)
         if self._preview_id is not None:
             self.after_cancel(self._preview_id)
             self._preview_id = None
@@ -612,8 +660,6 @@ class SEMStitcherGUI(ctk.CTk):
             self._append_log(self.t('log_error', e=error))
             self._render_state()
             return
-        self.progress_bar.set(0)
-        self.progress_bar.start()
         self._render_state()
         self._poll_task()
 
@@ -661,7 +707,6 @@ class SEMStitcherGUI(ctk.CTk):
             self._append_log(self.t('log_error', e=error))
             self._render_state()
             return
-        self.progress_bar.start()
         self._render_state()
         self._poll_project_job()
 
@@ -732,6 +777,7 @@ class SEMStitcherGUI(ctk.CTk):
             return
         for message in self.task.poll():
             self._append_log(message)
+        self._refresh_progress()
         if self.task.busy:
             self._poll_id = self.after(75, self._poll_task)
             return
@@ -775,13 +821,15 @@ class SEMStitcherGUI(ctk.CTk):
         if self._busy or self.task.state != TaskState.SUCCEEDED or self.task.inspection is None:
             return
         if self._inspector is not None and not self._inspector.closed:
-            self._inspector.lift()
+            self._show_inspection(not self._inspection_visible)
             return
-        self._inspector = SeamInspector(self, self.stitched_result, self.task.inspection, self.lang)
+        self._inspector = SeamInspector(self.inspection_host, self.stitched_result, self.task.inspection, self.lang)
+        self._inspector.grid(row=0, column=0, sticky='nsew')
+        self._show_inspection(True)
 
     def _update_preview(self):
         self._preview_id = None
-        if self._closing or self.stitched_result is None:
+        if self._closing or self.stitched_result is None or self._inspection_visible:
             return
         # Resize the original bit depth first. Never allocate a full-panorama
         # 8-bit display copy on each resize; cache its common display range.
